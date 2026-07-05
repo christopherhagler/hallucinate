@@ -1,0 +1,38 @@
+# clang-tidy configuration for the Hallucinate OS kernel (freestanding C11).
+#
+# Checks chosen for kernel code: bug-prone patterns, the static analyzer, and
+# a portability/readability core. Checks that assume a hosted libc, C++, or
+# that fight kernel idioms are disabled explicitly below:
+#
+#   insecureAPI.DeprecatedOrUnsafeBufferHandling  recommends Annex K *_s
+#       functions that do not exist in a freestanding kernel.
+#   performance-no-int-to-ptr, core.FixedAddressDereference  MMIO requires
+#       casting fixed physical/virtual addresses to pointers.
+#   misc-include-cleaner  misfires in freestanding builds (flags local
+#       variables as needing headers).
+#   readability-implicit-bool-conversion  fights C11 semantics, where the
+#       logical operators yield int, not bool.
+Checks: >
+  bugprone-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -clang-analyzer-core.FixedAddressDereference,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -performance-no-int-to-ptr,
+  -readability-braces-around-statements,
+  -readability-else-after-return,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-isolate-declaration,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix,
+  -readability-avoid-const-params-in-decls
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^(kernel|tests)/.*'

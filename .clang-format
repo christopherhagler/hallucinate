@@ -1,0 +1,15 @@
+# Hallucinate OS code style. Enforced by `make format-check`.
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+PointerAlignment: Right
+AlignConsecutiveMacros: Consecutive
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+IndentCaseLabels: false
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
