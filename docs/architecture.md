@@ -26,8 +26,12 @@ exists today and the structure the rest of the roadmap builds on. Companion docu
 ```
 boot/                     two-stage BIOS bootloader (NASM, flat binaries)
 kernel/
-  arch/x86_64/            entry stub, port I/O, CPU intrinsics (grows: GDT, IDT, paging)
-  drivers/                serial (16550), VGA text (grows: virtio, keyboard)
+  arch/x86_64/            entry stub, GDT/TSS, IDT + trap dispatch (isr.asm),
+                          IRQ layer, 8259 PIC, 4-level paging, port I/O, CPU intrinsics
+  drivers/                serial (16550), VGA text, 8254 PIT, PS/2 keyboard
+                          (kbd_map.c: pure scancode translation, host-tested)
+  mm/                     pmm_core.c + pmm.c (frame allocator),
+                          vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
   lib/                    freestanding C library: string.c, fmt.c (vsnprintf)
   include/                public kernel headers (bootinfo.h, memlayout.h, ...)
   console.c               console multiplexer (serial + VGA)
@@ -35,7 +39,7 @@ kernel/
   panic.c                 fatal-error path (file/line, halt)
   selftest.c              boot-time assertion suite
   main.c                  kmain: bring-up sequence
-  linker.ld               higher-half link script
+  linker.ld               higher-half link script (W^X section symbols)
 tools/mkimage.py          disk image assembler + boot-protocol validator
 tests/host/               unit tests, compiled for macOS under ASan/UBSan
 tests/run_qemu.py         headless QEMU integration harness
@@ -55,11 +59,20 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 
 1. `console_init()` — serial COM1 (115200 8N1, with loopback self-test; a missing UART is
    tolerated) and VGA text mode. All output goes to both sinks.
-2. Validate the bootinfo block (magic, version, E820 sanity); panic on any mismatch.
-3. Print the E820 memory map and total usable memory.
-4. `selftest_run()` — in-kernel assertions over the freestanding library.
-5. `boot: complete` marker, then halt. Phase 2 (GDT/IDT, interrupts, memory management)
-   continues from this point.
+2. `gdt_init()` / `idt_init()` / `pic_init()` / `irq_init()` — kernel descriptor tables
+   (TSS with a dedicated double-fault IST stack), 256 interrupt stubs feeding a trap
+   dispatcher (unhandled traps dump all registers and panic), PICs remapped to vectors
+   0x20–0x2F and masked.
+3. Validate the bootinfo block (magic, version, E820 sanity); panic on any mismatch.
+4. `pmm_init()` — bitmap frame allocator seeded from E820 (see docs/memory-map.md).
+5. `vmm_init()` — kernel page tables: HHDM direct map, W^X kernel image, NX, no
+   identity map; page-fault handler with error decoding.
+6. `kmalloc_init()` — slab heap over PMM frames.
+7. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
+   ticks by sleeping on it.
+8. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
+   protections, and heap.
+9. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)
 

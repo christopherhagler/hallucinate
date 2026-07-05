@@ -11,7 +11,9 @@
 #include <stdint.h>
 
 #include <arch/x86_64/trap.h>
+#include <compiler.h>
 #include <fmt.h>
+#include <kmalloc.h>
 #include <kprintf.h>
 #include <memlayout.h>
 #include <panic.h>
@@ -161,6 +163,40 @@ static void test_vmm(void) {
     CHECK(bi->magic == BOOTINFO_MAGIC);
 }
 
+static void test_heap(void) {
+    uint64_t objects_before = kmalloc_live_objects();
+    uint64_t pages_before = kmalloc_live_pages();
+    uint64_t frames_before = pmm_free_frames();
+
+    /* A spread of sizes across classes and into the large path. */
+    static const uint32_t sizes[] = {1, 16, 64, 200, 1024, 1500, 5000, 3 * 4096};
+    void *ptrs[ARRAY_SIZE(sizes)];
+    for (uint32_t i = 0; i < ARRAY_SIZE(sizes); i++) {
+        ptrs[i] = kmalloc(sizes[i]);
+        CHECK(ptrs[i] != NULL);
+        CHECK(((uintptr_t)ptrs[i] & 0xF) == 0);
+        memset(ptrs[i], (int)(0x30 + i), sizes[i]);
+    }
+    for (uint32_t i = 0; i < ARRAY_SIZE(sizes); i++) {
+        const uint8_t *b = ptrs[i];
+        CHECK(b[0] == 0x30 + i && b[sizes[i] - 1] == 0x30 + i);
+    }
+    CHECK(kmalloc_live_objects() > objects_before);
+
+    void *z = kzalloc(300);
+    CHECK(z != NULL);
+    const uint8_t *zb = z;
+    CHECK(zb[0] == 0 && zb[150] == 0 && zb[299] == 0);
+    kfree(z);
+
+    for (uint32_t i = 0; i < ARRAY_SIZE(sizes); i++) {
+        kfree(ptrs[i]);
+    }
+    CHECK(kmalloc_live_objects() == objects_before);
+    CHECK(kmalloc_live_pages() == pages_before);
+    CHECK(pmm_free_frames() == frames_before);
+}
+
 void selftest_run(void) {
     assertions = 0;
     test_string();
@@ -168,5 +204,6 @@ void selftest_run(void) {
     test_traps();
     test_pmm();
     test_vmm();
+    test_heap();
     kprintf("selftest: passed (%d assertions)\n", assertions);
 }

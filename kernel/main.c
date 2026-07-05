@@ -16,6 +16,7 @@
 #include <console.h>
 #include <init.h>
 #include <keyboard.h>
+#include <kmalloc.h>
 #include <kprintf.h>
 #include <memlayout.h>
 #include <panic.h>
@@ -93,6 +94,8 @@ void kmain(uint64_t bootinfo_phys) {
 
     pmm_init(bi);
     vmm_init(bi);
+    kmalloc_init();
+    kprintf("heap: slab allocator ready\n");
 
     timer_init(TIMER_HZ);
     keyboard_init();

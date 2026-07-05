@@ -28,23 +28,28 @@ Two questions drive the project:
 
 ## Current status
 
-**Phase 1 complete: two-stage bootloader and higher-half x86_64 kernel.**
+**Phase 2 complete: interrupts and memory management.**
 
-The system boots from a raw disk image in QEMU: a 512-byte MBR stage 1 loads stage 2, which
-enables the A20 line, collects the BIOS E820 memory map, loads the kernel ELF above 1 MiB
-using unreal mode, builds the initial page tables, enters 64-bit long mode, and jumps to a
-higher-half kernel at `0xffffffff80000000`. The kernel brings up serial and VGA text
-consoles, validates the boot protocol, prints the memory map, and runs a boot-time
-self-test suite.
+The system boots from a raw disk image in QEMU: our two-stage BIOS bootloader (A20, E820,
+unreal-mode ELF load, long-mode transition) hands off to a higher-half kernel at
+`0xffffffff80000000`. The kernel owns its descriptor tables (GDT/TSS with a double-fault
+IST stack, 256-vector IDT with register-dumping exception handlers), takes timer and
+keyboard interrupts through a remapped PIC, and manages memory end to end: an
+E820-seeded physical frame allocator, kernel-built page tables with a full physical
+direct map and a W^X kernel image (NX enforced everywhere data lives), and a slab
+`kmalloc`. Every boot runs an in-kernel self-test suite; typing in the QEMU window echoes
+through the keyboard driver.
 
 ```
-Hallucinate OS v0.1.0 (x86_64)
-boot: BIOS drive 0x80, boot protocol v1
+Hallucinate OS v0.2.0 (x86_64)
+cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked
 e820: 7 entries
-e820:  [0x0000000000 - 0x000009fbff] usable
-...
 memory: 255 MiB usable
-selftest: passed (12 assertions)
+pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x110000
+vmm: kernel page tables active, 4096 MiB direct-mapped at 0xffff800000000000
+heap: slab allocator ready
+timer: 100 Hz, ticking (slept 3 ticks)
+selftest: passed (...)
 boot: complete
 ```
 
@@ -54,8 +59,8 @@ boot: complete
 |---|---|---|
 | 0 | Toolchain, build system, test harness | ✅ done |
 | 1 | Two-stage bootloader, long mode, higher-half kernel, consoles | ✅ done |
-| 2 | GDT/IDT, exceptions, timer, physical + virtual memory, kernel heap | next |
-| 3 | Kernel threads and scheduling | planned |
+| 2 | GDT/IDT, exceptions, timer, physical + virtual memory, kernel heap | ✅ done |
+| 3 | Kernel threads and scheduling | next |
 | 4 | Ring 3 userspace, ELF loader, processes | planned |
 | 5 | virtio-blk, VFS, ext2 | planned |
 | 6 | AI service layer: `/dev/ai`, AI daemon, natural-language shell | planned |

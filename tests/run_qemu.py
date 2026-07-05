@@ -19,6 +19,7 @@ PASS_MARKERS = [
     "e820:",
     "pmm: ",
     "vmm: kernel page tables active",
+    "heap: slab allocator ready",
     "timer: 100 Hz, ticking",
     "selftest: passed",
     "boot: complete",
