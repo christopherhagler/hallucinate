@@ -15,6 +15,7 @@ import time
 
 PASS_MARKERS = [
     "Hallucinate OS",
+    "cpu: GDT/TSS loaded",
     "e820:",
     "selftest: passed",
     "boot: complete",

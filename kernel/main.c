@@ -7,6 +7,9 @@
 #include <stdint.h>
 
 #include <arch/x86_64/cpu.h>
+#include <arch/x86_64/gdt.h>
+#include <arch/x86_64/pic.h>
+#include <arch/x86_64/trap.h>
 #include <bootinfo.h>
 #include <compiler.h>
 #include <console.h>
@@ -69,6 +72,11 @@ static uint64_t print_memory_map(const struct bootinfo *bi) {
 void kmain(uint64_t bootinfo_phys) {
     console_init();
     kprintf("\nHallucinate OS v" KERNEL_VERSION " (x86_64)\n");
+
+    gdt_init();
+    idt_init();
+    pic_init();
+    kprintf("cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked\n");
 
     const struct bootinfo *bi = bootinfo_get(bootinfo_phys);
     kprintf("boot: BIOS drive %#x, boot protocol v%u\n", bi->boot_drive, bi->version);

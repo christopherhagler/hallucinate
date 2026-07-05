@@ -7,8 +7,10 @@
  */
 #include <selftest.h>
 
+#include <stddef.h>
 #include <stdint.h>
 
+#include <arch/x86_64/trap.h>
 #include <fmt.h>
 #include <kprintf.h>
 #include <panic.h>
@@ -69,9 +71,30 @@ static void test_fmt(void) {
     check_fmt("tru", buf);
 }
 
+static int breakpoints_taken;
+
+static void breakpoint_handler(struct trapframe *tf) {
+    /* #BP is a trap: RIP already points past the int3. */
+    breakpoints_taken++;
+    assertions++;
+    if (tf->vector != VEC_BREAKPOINT) {
+        panic("selftest: breakpoint handler got vector %llu", (unsigned long long)tf->vector);
+    }
+}
+
+static void test_traps(void) {
+    breakpoints_taken = 0;
+    trap_handler_t prev = trap_register(VEC_BREAKPOINT, breakpoint_handler);
+    CHECK(prev == NULL);
+    __asm__ volatile("int3");
+    CHECK(breakpoints_taken == 1);
+    trap_register(VEC_BREAKPOINT, prev);
+}
+
 void selftest_run(void) {
     assertions = 0;
     test_string();
     test_fmt();
+    test_traps();
     kprintf("selftest: passed (%d assertions)\n", assertions);
 }
