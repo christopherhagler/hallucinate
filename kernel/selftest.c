@@ -13,7 +13,9 @@
 #include <arch/x86_64/trap.h>
 #include <fmt.h>
 #include <kprintf.h>
+#include <memlayout.h>
 #include <panic.h>
+#include <pmm.h>
 #include <string.h>
 
 static int assertions;
@@ -91,10 +93,47 @@ static void test_traps(void) {
     trap_register(VEC_BREAKPOINT, prev);
 }
 
+static void test_pmm(void) {
+    uint64_t free_before = pmm_free_frames();
+    CHECK(free_before > 0);
+
+    /* Allocate a batch of frames: page-aligned, distinct, writable. */
+    enum { BATCH = 32 };
+    uint64_t frames[BATCH];
+    for (int i = 0; i < BATCH; i++) {
+        frames[i] = pmm_alloc_frame();
+        CHECK(frames[i] != 0);
+        CHECK((frames[i] & (PAGE_SIZE - 1)) == 0);
+        CHECK(frames[i] < BOOT_MAPPED_LIMIT);
+        for (int j = 0; j < i; j++) {
+            CHECK(frames[i] != frames[j]);
+        }
+        /* Prove the frame is real, mapped memory. */
+        uint8_t *mem = phys_to_virt(frames[i]);
+        memset(mem, 0xA5 + i, PAGE_SIZE);
+        CHECK(mem[0] == (uint8_t)(0xA5 + i) && mem[PAGE_SIZE - 1] == (uint8_t)(0xA5 + i));
+    }
+    CHECK(pmm_free_frames() == free_before - BATCH);
+
+    /* Contiguous run, 8 frames aligned to 8. */
+    uint64_t run = pmm_alloc_frames(8, 8);
+    CHECK(run != 0);
+    CHECK((run & ((8 * PAGE_SIZE) - 1)) == 0);
+
+    for (int i = 0; i < BATCH; i++) {
+        pmm_free_frame(frames[i]);
+    }
+    for (int i = 0; i < 8; i++) {
+        pmm_free_frame(run + ((uint64_t)i * PAGE_SIZE));
+    }
+    CHECK(pmm_free_frames() == free_before);
+}
+
 void selftest_run(void) {
     assertions = 0;
     test_string();
     test_fmt();
     test_traps();
+    test_pmm();
     kprintf("selftest: passed (%d assertions)\n", assertions);
 }

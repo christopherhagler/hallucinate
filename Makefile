@@ -87,12 +87,13 @@ HOST_CFLAGS := -std=c11 -Wall -Wextra -Werror -g -O1 \
     -Ikernel/include $(HOST_RENAMES)
 
 HOST_TEST_SRCS := tests/host/test_main.c tests/host/test_string.c \
-    tests/host/test_fmt.c tests/host/test_kbd.c \
-    kernel/lib/string.c kernel/lib/fmt.c kernel/drivers/kbd_map.c
+    tests/host/test_fmt.c tests/host/test_kbd.c tests/host/test_pmm.c \
+    kernel/lib/string.c kernel/lib/fmt.c kernel/drivers/kbd_map.c \
+    kernel/mm/pmm_core.c
 
 $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
                      kernel/include/string.h kernel/include/fmt.h \
-                     kernel/include/kbd_map.h
+                     kernel/include/kbd_map.h kernel/include/pmm_core.h
 	@mkdir -p $(BUILD)
 	$(CC) $(HOST_CFLAGS) $(HOST_TEST_SRCS) -o $@
 

@@ -36,3 +36,7 @@ Checks: >
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '^(kernel|tests)/.*'
+CheckOptions:
+  # Linker-script symbols; underscore prefixes are the established
+  # convention and there is no hosted namespace to collide with.
+  bugprone-reserved-identifier.AllowedIdentifiers: '_kernel_start;_kernel_end'

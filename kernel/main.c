@@ -19,6 +19,7 @@
 #include <kprintf.h>
 #include <memlayout.h>
 #include <panic.h>
+#include <pmm.h>
 #include <selftest.h>
 #include <timer.h>
 
@@ -88,6 +89,8 @@ void kmain(uint64_t bootinfo_phys) {
 
     uint64_t usable = print_memory_map(bi);
     kprintf("memory: %llu MiB usable\n", (unsigned long long)(usable >> 20));
+
+    pmm_init(bi);
 
     timer_init(TIMER_HZ);
     keyboard_init();
