@@ -22,6 +22,7 @@
 #include <pmm.h>
 #include <selftest.h>
 #include <timer.h>
+#include <vmm.h>
 
 #define KERNEL_VERSION "0.2.0"
 #define TIMER_HZ       100
@@ -91,6 +92,7 @@ void kmain(uint64_t bootinfo_phys) {
     kprintf("memory: %llu MiB usable\n", (unsigned long long)(usable >> 20));
 
     pmm_init(bi);
+    vmm_init(bi);
 
     timer_init(TIMER_HZ);
     keyboard_init();

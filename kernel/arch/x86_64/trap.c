@@ -69,7 +69,7 @@ static const char *const exception_names[32] = {
     "reserved (31)",
 };
 
-static void dump_trapframe(const struct trapframe *tf) {
+void trap_dump(const struct trapframe *tf) {
     kprintf("trap: vector %llu, error code %#llx\n", (unsigned long long)tf->vector,
             (unsigned long long)tf->error);
     kprintf("  rip=%016llx cs=%04llx rflags=%08llx\n", (unsigned long long)tf->rip,
@@ -105,13 +105,13 @@ void trap_dispatch(struct trapframe *tf) {
         return;
     }
     if (tf->vector < 32) {
-        dump_trapframe(tf);
+        trap_dump(tf);
         panic("unhandled exception %llu (%s)", (unsigned long long)tf->vector,
               exception_names[tf->vector]);
     }
     /* No stray interrupts can occur while every line is masked; one
      * firing anyway means broken interrupt routing. */
-    dump_trapframe(tf);
+    trap_dump(tf);
     panic("unexpected interrupt, vector %llu", (unsigned long long)tf->vector);
 }
 

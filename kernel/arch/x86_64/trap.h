@@ -44,3 +44,6 @@ void idt_init(void);
 
 /* Entry from isr.asm only; never call directly. */
 void trap_dispatch(struct trapframe *tf);
+
+/* Print the full register state (and CR2/CR3 for page faults). */
+void trap_dump(const struct trapframe *tf);

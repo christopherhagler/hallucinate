@@ -24,6 +24,7 @@ extern char _kernel_start[];
 extern char _kernel_end[];
 
 static struct pmm pmm;
+static uint64_t bitmap_phys_addr;
 
 static uint64_t page_up(uint64_t addr) {
     return (addr + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
@@ -88,6 +89,7 @@ void pmm_init(const struct bootinfo *bi) {
               (unsigned long long)bitmap_size);
     }
 
+    bitmap_phys_addr = bitmap_phys;
     pmm_core_init(&pmm, phys_to_virt(bitmap_phys), nframes);
 
     for (uint32_t i = 0; i < bi->e820_count; i++) {
@@ -143,6 +145,10 @@ void pmm_free_frame(uint64_t paddr) {
     if (pmm_core_free(&pmm, paddr >> PAGE_SHIFT) != 0) {
         panic("pmm: double or invalid free of frame %#llx", (unsigned long long)paddr);
     }
+}
+
+void pmm_rebase(void) {
+    pmm.bitmap = phys_to_virt(bitmap_phys_addr);
 }
 
 uint64_t pmm_total_frames(void) {

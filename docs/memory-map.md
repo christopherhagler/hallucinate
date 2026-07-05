@@ -24,40 +24,40 @@ first.
 
 ## Virtual address space
 
-The kernel is a **higher-half kernel** linked at:
+Two regimes exist, before and after `vmm_init()`.
 
-```
-KERNEL_VMA = 0xffffffff80000000   (kernel/include/memlayout.h)
-```
+### During boot (stage 2's tables)
 
-Boot page tables (built by stage 2) map the first **1 GiB** of physical memory with
-2 MiB pages, twice:
+Stage 2 maps the first **1 GiB** of physical memory with 2 MiB pages, twice: identity at
+`0` and at `KERNEL_VMA`. `hhdm_base` (see `memlayout.h`) starts at `KERNEL_VMA`, so
+`phys_to_virt()` works for physical addresses below `BOOT_MAPPED_LIMIT` (1 GiB) only.
+Early consumers (bootinfo validation, PMM construction, VMM table building) stay inside
+that window.
 
-| Virtual range | Maps to | Purpose |
+### After `vmm_init()` (the kernel's tables)
+
+| Virtual range | Maps to | Attributes |
 |---|---|---|
-| `0x0000000000000000` + 1 GiB | phys `0`–1 GiB | identity map (bootstrap only; dropped in Phase 2) |
-| `0xffffffff80000000` + 1 GiB | phys `0`–1 GiB | kernel half; all kernel addresses |
+| `0` .. `0x00007fffffffffff` | *unmapped* | userspace-to-be; null page faults |
+| `HHDM_BASE = 0xffff800000000000` + `paddr` | all RAM + first 4 GiB (MMIO window) | 2 MiB global pages, NX; RAM write-back, non-RAM cache-disabled |
+| `KERNEL_VMA = 0xffffffff80000000` + `paddr` | kernel image only | 4 KiB global pages, W^X (below) |
 
-Both mappings share a single page directory, so they are identical by construction.
-`BOOT_MAPPED_LIMIT` (1 GiB) bounds what `phys_to_virt`/`virt_to_phys` may touch until the
-real VMM exists; the kernel panics on any bootinfo pointer outside it.
-
-Kernel virtual layout within the higher half:
+Kernel image protections (4 KiB granularity, boundaries page-aligned by the linker
+script, verified by boot selftests):
 
 ```
-0xffffffff80000000   KERNEL_VMA (phys 0 alias)
-0xffffffff80100000   kernel image start (_kernel_start, phys 0x100000)
-    .text  .rodata  .data  .bss     (each 4 KiB-aligned, see kernel/linker.ld)
-                     kernel image end (_kernel_end)
-0xffffffff800b8000   VGA text buffer alias used by the VGA driver
+_text_start   .. _text_end     RX   (executable, read-only)
+_rodata_start .. _rodata_end   RO   (NX)
+_data_start   .. _data_end     RW   (NX; covers .data and .bss)
 ```
 
-## Planned evolution (Phase 2)
+`vmm_init()` also enables `EFER.NXE`, `CR0.WP`, and `CR4.PGE`, flips `hhdm_base` to
+`HHDM_BASE` (the PMM re-derives its bitmap pointer at that moment via `pmm_rebase()`),
+and installs a page-fault handler that decodes the error code and CR2 before panicking.
+The boot identity map and the old 1 GiB alias are gone from that point; reserved E820
+ranges above 4 GiB (e.g. the 64-bit PCI hole) are deliberately not mapped.
 
-- The kernel installs its own page tables: identity map dropped, kernel half retained,
-  a physical-map window (`HHDM`-style) added for frame access, 4 KiB granularity where
-  protection demands it (`.rodata` read-only, `.text` execute-only data-wise, NX
-  elsewhere).
-- The physical frame allocator is seeded from the E820 map minus the kernel image and
-  bootinfo-derived reservations.
-- This document is updated in the same commit as any layout change.
+The frame allocator (`pmm`) is seeded from the E820 map minus the kernel image, low
+memory, and its own bitmap; see `kernel/mm/pmm.c` for the construction order.
+
+This document is updated in the same commit as any layout change.

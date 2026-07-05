@@ -17,6 +17,9 @@
 #include <panic.h>
 #include <pmm.h>
 #include <string.h>
+#include <vmm.h>
+
+#include <arch/x86_64/paging.h>
 
 static int assertions;
 
@@ -129,11 +132,41 @@ static void test_pmm(void) {
     CHECK(pmm_free_frames() == free_before);
 }
 
+static void test_vmm(void) {
+    extern char _text_start[];
+    extern char _rodata_start[];
+    extern char _data_start[];
+
+    /* W^X on the kernel image: text executable and read-only, rodata
+     * NX and read-only, data NX and writable. */
+    uint64_t pte = vmm_kernel_lookup((uint64_t)_text_start, NULL);
+    CHECK((pte & PTE_P) != 0 && (pte & PTE_W) == 0 && (pte & PTE_NX) == 0);
+    pte = vmm_kernel_lookup((uint64_t)_rodata_start, NULL);
+    CHECK((pte & PTE_P) != 0 && (pte & PTE_W) == 0 && (pte & PTE_NX) != 0);
+    pte = vmm_kernel_lookup((uint64_t)_data_start, NULL);
+    CHECK((pte & PTE_P) != 0 && (pte & PTE_W) != 0 && (pte & PTE_NX) != 0);
+
+    /* The HHDM translates back to the physical address. */
+    uint64_t phys = 0;
+    pte = vmm_kernel_lookup(HHDM_BASE + 0x6000, &phys);
+    CHECK((pte & PTE_P) != 0 && phys == 0x6000);
+    CHECK((pte & PTE_NX) != 0); /* no code ever runs from the HHDM */
+
+    /* The null page and the old identity map are gone. */
+    CHECK(vmm_kernel_lookup(0, NULL) == 0);
+    CHECK(vmm_kernel_lookup(0x100000, NULL) == 0);
+
+    /* The bootinfo block is still readable through the new tables. */
+    const struct bootinfo *bi = phys_to_virt(0x6000);
+    CHECK(bi->magic == BOOTINFO_MAGIC);
+}
+
 void selftest_run(void) {
     assertions = 0;
     test_string();
     test_fmt();
     test_traps();
     test_pmm();
+    test_vmm();
     kprintf("selftest: passed (%d assertions)\n", assertions);
 }

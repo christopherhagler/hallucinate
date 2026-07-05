@@ -36,3 +36,10 @@ void pmm_free_frame(uint64_t paddr);
 /* Statistics, in frames. */
 uint64_t pmm_total_frames(void);
 uint64_t pmm_free_frames(void);
+
+/*
+ * Re-derive the bitmap pointer through the current direct map. Called
+ * by vmm_init() immediately after it moves hhdm_base; the pointer
+ * handed to pmm_init() is stale from that moment on.
+ */
+void pmm_rebase(void);

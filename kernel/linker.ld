@@ -16,18 +16,23 @@ SECTIONS
 
     _kernel_start = .;
 
+    _text_start = .;
     .text : AT(ADDR(.text) - KERNEL_VMA)
     {
         *(.text .text.*)
     }
+    _text_end = .;
 
     . = ALIGN(0x1000);
+    _rodata_start = .;
     .rodata : AT(ADDR(.rodata) - KERNEL_VMA)
     {
         *(.rodata .rodata.*)
     }
+    _rodata_end = .;
 
     . = ALIGN(0x1000);
+    _data_start = .;
     .data : AT(ADDR(.data) - KERNEL_VMA)
     {
         *(.data .data.*)
@@ -39,6 +44,7 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
     }
+    _data_end = .;
 
     _kernel_end = .;
 

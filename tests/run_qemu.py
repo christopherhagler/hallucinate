@@ -18,6 +18,7 @@ PASS_MARKERS = [
     "cpu: GDT/TSS loaded",
     "e820:",
     "pmm: ",
+    "vmm: kernel page tables active",
     "timer: 100 Hz, ticking",
     "selftest: passed",
     "boot: complete",

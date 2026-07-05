@@ -24,7 +24,13 @@
 #define CRTC_CURSOR_HI 0x0E
 #define CRTC_CURSOR_LO 0x0F
 
-static volatile uint16_t *const vga_mem = (volatile uint16_t *)(KERNEL_VMA + 0xB8000);
+#define VGA_PHYS 0xB8000u
+
+/* Resolved per call: the direct-map base moves when the VMM installs
+ * the real HHDM (see memlayout.h). */
+static volatile uint16_t *vga_mem(void) {
+    return phys_to_virt(VGA_PHYS);
+}
 
 static int cur_row;
 static int cur_col;
@@ -44,7 +50,7 @@ static void move_hw_cursor(void) {
 static void scroll(void) {
     /* volatile qualifier dropped for the bulk move; the buffer is ordinary
      * memory and no other writer exists before interrupts are enabled. */
-    uint16_t *mem = (uint16_t *)vga_mem;
+    uint16_t *mem = (uint16_t *)vga_mem();
     memmove(mem, mem + VGA_COLS, (size_t)(VGA_ROWS - 1) * VGA_COLS * 2);
     for (int col = 0; col < VGA_COLS; col++) {
         mem[((VGA_ROWS - 1) * VGA_COLS) + col] = cell(' ');
@@ -53,7 +59,7 @@ static void scroll(void) {
 
 void vga_init(void) {
     for (int i = 0; i < VGA_ROWS * VGA_COLS; i++) {
-        vga_mem[i] = cell(' ');
+        vga_mem()[i] = cell(' ');
     }
     cur_row = 0;
     cur_col = 0;
@@ -76,7 +82,7 @@ void vga_putc(char c) {
         if ((uint8_t)c < 0x20) {
             break; /* other control characters are ignored */
         }
-        vga_mem[(cur_row * VGA_COLS) + cur_col] = cell(c);
+        vga_mem()[(cur_row * VGA_COLS) + cur_col] = cell(c);
         cur_col++;
         break;
     }
