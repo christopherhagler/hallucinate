@@ -8,18 +8,22 @@
 
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/gdt.h>
+#include <arch/x86_64/irq.h>
 #include <arch/x86_64/pic.h>
 #include <arch/x86_64/trap.h>
 #include <bootinfo.h>
 #include <compiler.h>
 #include <console.h>
 #include <init.h>
+#include <keyboard.h>
 #include <kprintf.h>
 #include <memlayout.h>
 #include <panic.h>
 #include <selftest.h>
+#include <timer.h>
 
-#define KERNEL_VERSION "0.1.0"
+#define KERNEL_VERSION "0.2.0"
+#define TIMER_HZ       100
 
 static const char *e820_type_name(uint32_t type) {
     switch (type) {
@@ -76,6 +80,7 @@ void kmain(uint64_t bootinfo_phys) {
     gdt_init();
     idt_init();
     pic_init();
+    irq_init();
     kprintf("cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked\n");
 
     const struct bootinfo *bi = bootinfo_get(bootinfo_phys);
@@ -84,10 +89,30 @@ void kmain(uint64_t bootinfo_phys) {
     uint64_t usable = print_memory_map(bi);
     kprintf("memory: %llu MiB usable\n", (unsigned long long)(usable >> 20));
 
+    timer_init(TIMER_HZ);
+    keyboard_init();
+    cpu_enable_interrupts();
+
+    uint64_t start = timer_ticks();
+    timer_sleep_ticks(3);
+    kprintf("timer: %u Hz, ticking (slept %llu ticks)\n", timer_hz(),
+            (unsigned long long)(timer_ticks() - start));
+
     selftest_run();
 
     kprintf("boot: complete\n");
 
-    /* Phase 2 continues here: GDT/IDT, timer, memory management. */
-    cpu_halt_forever();
+    /*
+     * Interactive placeholder until the shell exists (Phase 6): echo
+     * keyboard input to both consoles, halting between interrupts.
+     */
+    kprintf("keyboard: type in the QEMU window; input echoes here\n");
+    for (;;) {
+        int c = keyboard_getchar();
+        if (c < 0) {
+            cpu_wait_for_interrupt();
+            continue;
+        }
+        kprintf("%c", c);
+    }
 }

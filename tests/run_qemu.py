@@ -17,6 +17,7 @@ PASS_MARKERS = [
     "Hallucinate OS",
     "cpu: GDT/TSS loaded",
     "e820:",
+    "timer: 100 Hz, ticking",
     "selftest: passed",
     "boot: complete",
 ]

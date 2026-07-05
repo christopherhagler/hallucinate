@@ -26,6 +26,12 @@ static inline void cpu_wait_for_interrupt(void) {
     __asm__ volatile("sti; hlt");
 }
 
+static inline int cpu_interrupts_enabled(void) {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    return (rflags & (1u << 9)) != 0; /* RFLAGS.IF */
+}
+
 static inline uint64_t read_cr2(void) {
     uint64_t v;
     __asm__ volatile("mov %%cr2, %0" : "=r"(v));
