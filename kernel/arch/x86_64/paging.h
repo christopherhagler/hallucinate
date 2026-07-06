@@ -50,3 +50,12 @@ uint64_t paging_lookup(const struct addrspace *as, uint64_t virt, uint64_t *phys
 
 /* Load CR3 with this address space. */
 void paging_activate(const struct addrspace *as);
+
+/*
+ * Tear down the user (lower) half of an address space: free every
+ * mapped frame and every page table under PML4 entries 0-255, then
+ * the PML4 itself. Contract: every user-mapped frame is owned by this
+ * address space (true until shared mappings exist), and the address
+ * space is not the active CR3.
+ */
+void paging_user_destroy(struct addrspace *as);

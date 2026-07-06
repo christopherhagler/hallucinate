@@ -29,4 +29,5 @@ section .bss
 align 16
 kstack:
     resb 16384                       ; 16 KiB boot stack
+global kstack_top                    ; the scheduler adopts this as thread 0's stack
 kstack_top:

@@ -21,8 +21,10 @@
 #include <memlayout.h>
 #include <panic.h>
 #include <pmm.h>
+#include <process.h>
 #include <sched.h>
 #include <selftest.h>
+#include <syscall.h>
 #include <timer.h>
 #include <vmm.h>
 
@@ -101,6 +103,9 @@ void kmain(uint64_t bootinfo_phys) {
     sched_init();
     kprintf("sched: online, round-robin, %u ms timeslice\n", 1000 / TIMER_HZ);
 
+    syscall_init();
+    kprintf("syscall: SYSCALL/SYSRET ready (Linux x86_64 ABI numbering)\n");
+
     timer_init(TIMER_HZ);
     keyboard_init();
     cpu_enable_interrupts();
@@ -111,6 +116,8 @@ void kmain(uint64_t bootinfo_phys) {
             (unsigned long long)(timer_ticks() - start));
 
     selftest_run();
+
+    process_run_init();
 
     kprintf("boot: complete\n");
 

@@ -46,6 +46,17 @@ $(BUILD)/kernel/%.o: kernel/%.asm
 	@mkdir -p $(dir $@)
 	$(NASM) -f elf64 -g -F dwarf $< -o $@
 
+# The embedded userspace init: user/init.asm -> flat binary -> kernel
+# .rodata blob. The explicit rule overrides the pattern rule above so
+# the object also depends on the binary it incbins.
+$(BUILD)/user/init.bin: user/init.asm
+	@mkdir -p $(dir $@)
+	$(NASM) -f bin $< -o $@
+
+$(BUILD)/kernel/user_blob.o: kernel/user_blob.asm $(BUILD)/user/init.bin
+	@mkdir -p $(dir $@)
+	$(NASM) -f elf64 -g -F dwarf -i $(BUILD)/user/ $< -o $@
+
 $(BUILD)/kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 	$(LD) -T kernel/linker.ld -nostdlib -static -z max-page-size=0x1000 \
 	    -o $@ $(KERNEL_OBJS)

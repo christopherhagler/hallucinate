@@ -24,12 +24,19 @@ static int index_at(uint64_t virt, int level) {
     return (int)((virt >> (12 + (9 * (level - 1)))) & 0x1FF);
 }
 
-/* Return the phys addr of the next-level table, allocating it if the
- * entry is empty. 0 means out of memory. */
-static uint64_t next_table(uint64_t table_phys, int index) {
+/*
+ * Return the phys addr of the next-level table, allocating it if the
+ * entry is empty. 0 means out of memory. User leaf mappings need
+ * PTE_US at every level of the walk, so it propagates upward here;
+ * the leaf entry still decides the effective permission.
+ */
+static uint64_t next_table(uint64_t table_phys, int index, uint64_t user_flag) {
     uint64_t *table = table_virt(table_phys);
     uint64_t entry = table[index];
     if (entry & PTE_P) {
+        if (user_flag != 0 && (entry & PTE_US) == 0) {
+            table[index] = entry | PTE_US;
+        }
         return entry & PTE_ADDR_MASK;
     }
     uint64_t frame = pmm_alloc_frame();
@@ -37,7 +44,7 @@ static uint64_t next_table(uint64_t table_phys, int index) {
         return 0;
     }
     memset(table_virt(frame), 0, SIZE_4K);
-    table[index] = frame | TABLE_FLAGS;
+    table[index] = frame | TABLE_FLAGS | user_flag;
     return frame;
 }
 
@@ -58,7 +65,7 @@ static int map_common(struct addrspace *as, uint64_t virt, uint64_t phys, uint64
     }
     uint64_t table = as->pml4_phys;
     for (int level = 4; level > leaf_level; level--) {
-        table = next_table(table, index_at(virt, level));
+        table = next_table(table, index_at(virt, level), flags & PTE_US);
         if (table == 0) {
             return PAGING_ENOMEM;
         }
@@ -103,4 +110,46 @@ uint64_t paging_lookup(const struct addrspace *as, uint64_t virt, uint64_t *phys
 
 void paging_activate(const struct addrspace *as) {
     write_cr3(as->pml4_phys);
+}
+
+void paging_user_destroy(struct addrspace *as) {
+    uint64_t *pml4 = table_virt(as->pml4_phys);
+    for (int i4 = 0; i4 < ENTRIES / 2; i4++) { /* lower half only */
+        if (!(pml4[i4] & PTE_P)) {
+            continue;
+        }
+        uint64_t pdpt_phys = pml4[i4] & PTE_ADDR_MASK;
+        uint64_t *pdpt = table_virt(pdpt_phys);
+        for (int i3 = 0; i3 < ENTRIES; i3++) {
+            if (!(pdpt[i3] & PTE_P)) {
+                continue;
+            }
+            uint64_t pd_phys = pdpt[i3] & PTE_ADDR_MASK;
+            uint64_t *pd = table_virt(pd_phys);
+            for (int i2 = 0; i2 < ENTRIES; i2++) {
+                if (!(pd[i2] & PTE_P)) {
+                    continue;
+                }
+                if (pd[i2] & PTE_PS) {
+                    uint64_t base = pd[i2] & PTE_ADDR_MASK & ~(SIZE_2M - 1);
+                    for (uint64_t off = 0; off < SIZE_2M; off += SIZE_4K) {
+                        pmm_free_frame(base + off);
+                    }
+                    continue;
+                }
+                uint64_t pt_phys = pd[i2] & PTE_ADDR_MASK;
+                uint64_t *pt = table_virt(pt_phys);
+                for (int i1 = 0; i1 < ENTRIES; i1++) {
+                    if (pt[i1] & PTE_P) {
+                        pmm_free_frame(pt[i1] & PTE_ADDR_MASK);
+                    }
+                }
+                pmm_free_frame(pt_phys);
+            }
+            pmm_free_frame(pd_phys);
+        }
+        pmm_free_frame(pdpt_phys);
+    }
+    pmm_free_frame(as->pml4_phys);
+    as->pml4_phys = 0;
 }

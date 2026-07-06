@@ -21,9 +21,12 @@ PASS_MARKERS = [
     "vmm: kernel page tables active",
     "heap: slab allocator ready",
     "sched: online",
+    "syscall: SYSCALL/SYSRET ready",
     "timer: 100 Hz, ticking",
     "selftest: sched interleave",
     "selftest: passed",
+    "hello from ring 3",
+    "user: init exited (status 0)",
     "boot: complete",
 ]
 

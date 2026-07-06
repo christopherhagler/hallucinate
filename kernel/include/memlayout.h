@@ -24,6 +24,10 @@
 #define HHDM_BASE         0xffff800000000000ull
 #define BOOT_MAPPED_LIMIT 0x40000000ull /* 1 GiB */
 
+/* End of user virtual addresses (the canonical lower half); user
+ * mappings and user-supplied pointers must sit strictly below it. */
+#define USER_VA_LIMIT 0x0000800000000000ull
+
 /* Current direct-map base; owned by kernel/mm/vmm.c. */
 extern uint64_t hhdm_base;
 

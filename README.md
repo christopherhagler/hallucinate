@@ -28,7 +28,7 @@ Two questions drive the project:
 
 ## Current status
 
-**Phase 3 complete: preemptive multitasking.**
+**Phase 3 complete; Phase 4 underway: the first userspace program runs in ring 3.**
 
 The system boots from a raw disk image in QEMU: our two-stage BIOS bootloader (A20, E820,
 unreal-mode ELF load, long-mode transition) hands off to a higher-half kernel at
@@ -37,10 +37,12 @@ IST stack, 256-vector IDT with register-dumping exception handlers), takes timer
 keyboard interrupts through a remapped PIC, and manages memory end to end: an
 E820-seeded physical frame allocator, kernel-built page tables with a full physical
 direct map and a W^X kernel image (NX enforced everywhere data lives), and a slab
-`kmalloc`. On top of that runs a preemptive round-robin scheduler: kernel threads with
-their own stacks, a 10 ms timeslice off the timer tick, timed sleep, and pthread-style
-join. Every boot proves it on the serial console — three threads interleaving in perfect
-rotation, a spinning thread failing to monopolize the CPU, and every stack reclaimed:
+`kmalloc`. On top of that runs a preemptive round-robin scheduler (kernel threads, 10 ms
+timeslices, timed sleep, pthread-style join) — and on top of *that*, userspace: a
+program embedded at build time gets its own address space, drops to ring 3, and talks
+back through `syscall` using the Linux x86_64 ABI convention. The `hello from ring 3`
+line below is printed by user code calling `write(1, …)`; its exit status 0 asserts that
+`getpid()` and the `-ENOSYS` path behaved too.
 
 ```
 Hallucinate OS v0.3.0 (x86_64)
@@ -51,9 +53,13 @@ pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x113000
 vmm: kernel page tables active, 4096 MiB direct-mapped at 0xffff800000000000
 heap: slab allocator ready
 sched: online, round-robin, 10 ms timeslice
+syscall: SYSCALL/SYSRET ready (Linux x86_64 ABI numbering)
 timer: 100 Hz, ticking (slept 3 ticks)
 selftest: sched interleave "abcabcabcabc"
 selftest: passed (701 assertions)
+user: launching init (embedded, 92 bytes)
+hello from ring 3
+user: init exited (status 0)
 boot: complete
 ```
 
@@ -65,7 +71,7 @@ boot: complete
 | 1 | Two-stage bootloader, long mode, higher-half kernel, consoles | ✅ done |
 | 2 | GDT/IDT, exceptions, timer, physical + virtual memory, kernel heap | ✅ done |
 | 3 | Kernel threads and scheduling | ✅ done |
-| 4 | Ring 3 userspace, ELF loader, processes | next |
+| 4 | Ring 3 userspace, ELF loader, processes | 🔨 in progress |
 | 5 | virtio-blk, VFS, ext2 | planned |
 | 6 | AI service layer: `/dev/ai`, AI daemon, natural-language shell | planned |
 | 7 | Linux syscall compatibility (static musl → busybox → dynamic) | planned |
@@ -103,7 +109,8 @@ test.
 
 ```
 boot/        stage1.asm (MBR), stage2.asm (A20, E820, long mode, ELF loader)
-kernel/      the kernel: arch/x86_64/, drivers/, lib/, and core
+kernel/      the kernel: arch/x86_64/, drivers/, mm/, sched/, proc/, lib/, and core
+user/        userspace programs (embedded init, for now)
 tools/       mkimage.py — assembles and validates the disk image
 tests/       host unit tests and the QEMU boot harness
 ```

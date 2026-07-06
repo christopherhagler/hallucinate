@@ -35,6 +35,14 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
 /* The currently running thread. */
 struct thread *thread_current(void);
 
+/*
+ * Bind the calling thread to an address space (NULL = back to the
+ * kernel address space) and activate it. The scheduler keeps it
+ * active whenever this thread runs, so the thread can then enter
+ * ring 3 or dereference user pointers.
+ */
+void sched_set_addrspace(struct addrspace *as);
+
 /* Yield the CPU, keeping the caller runnable. Returns when scheduled
  * again (immediately if no other thread is ready). */
 void sched_yield(void);

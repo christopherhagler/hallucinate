@@ -14,6 +14,7 @@
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/paging.h>
 #include <arch/x86_64/trap.h>
+#include <errno.h>
 #include <kprintf.h>
 #include <memlayout.h>
 #include <panic.h>
@@ -140,4 +141,27 @@ void vmm_init(const struct bootinfo *bi) {
 
 uint64_t vmm_kernel_lookup(uint64_t virt, uint64_t *phys_out) {
     return paging_lookup(&kernel_as, virt, phys_out);
+}
+
+struct addrspace *vmm_kernel_addrspace(void) {
+    return &kernel_as;
+}
+
+int vmm_addrspace_create_user(struct addrspace *as) {
+    if (paging_addrspace_create(as) != PAGING_OK) {
+        return -ENOMEM;
+    }
+    /*
+     * Alias the kernel half. New top-level kernel mappings after this
+     * point would need reflecting into every process PML4 — so they
+     * are not allowed: vmm_init() populated every kernel PML4 slot the
+     * kernel will ever use (HHDM + image), and lower-level tables are
+     * shared through these entries.
+     */
+    uint64_t *dst = phys_to_virt(as->pml4_phys);
+    const uint64_t *src = phys_to_virt(kernel_as.pml4_phys);
+    for (int i = 256; i < 512; i++) {
+        dst[i] = src[i];
+    }
+    return 0;
 }

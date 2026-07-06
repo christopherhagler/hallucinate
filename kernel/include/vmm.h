@@ -7,6 +7,8 @@
 
 #include <bootinfo.h>
 
+struct addrspace;
+
 /*
  * Replace the boot page tables with kernel-owned ones:
  *
@@ -27,3 +29,14 @@ void vmm_init(const struct bootinfo *bi);
 /* Leaf PTE covering a kernel virtual address (0 if unmapped);
  * translated physical address in *phys_out when non-NULL. */
 uint64_t vmm_kernel_lookup(uint64_t virt, uint64_t *phys_out);
+
+/* The kernel address space (what CR3 holds when no process runs). */
+struct addrspace *vmm_kernel_addrspace(void);
+
+/*
+ * Create a user address space: fresh lower half, kernel upper half
+ * shared by aliasing the kernel PML4's entries 256-511 (kernel
+ * mappings lack PTE_US, so ring 3 still cannot touch them).
+ * Returns 0 or -ENOMEM.
+ */
+int vmm_addrspace_create_user(struct addrspace *as);

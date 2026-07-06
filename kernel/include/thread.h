@@ -12,6 +12,8 @@
 
 #include <stdint.h>
 
+struct addrspace; /* arch paging (kernel-only field, opaque here) */
+
 enum thread_state {
     THREAD_READY,    /* on the ready queue, waiting for the CPU */
     THREAD_RUNNING,  /* currently executing (at most one thread) */
@@ -44,4 +46,12 @@ struct thread {
     /* Base of the kmalloc'd kernel stack; NULL for bootstrap threads
      * (the boot thread runs on the boot stack, which is never freed). */
     void *stack_base;
+
+    /* Top of the kernel stack: what TSS.rsp0 and the syscall entry
+     * stack are set to while this thread runs ring 3 code. */
+    uint64_t kstack_top;
+
+    /* Address space active while this thread runs; NULL means the
+     * kernel address space (all pure kernel threads). */
+    struct addrspace *as;
 };

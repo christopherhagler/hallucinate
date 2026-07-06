@@ -7,6 +7,7 @@ exists today and the structure the rest of the roadmap builds on. Companion docu
 - [boot-protocol.md](boot-protocol.md) — bootloader ↔ kernel contract (versioned)
 - [memory-map.md](memory-map.md) — physical and virtual address space layout
 - [scheduling.md](scheduling.md) — threads, context switch, preemption
+- [userspace.md](userspace.md) — ring 3, syscall ABI, user address spaces
 - [testing.md](testing.md) — the three-level test strategy behind `make check`
 
 ## Design principles
@@ -36,6 +37,8 @@ kernel/
                           vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
   sched/                  sched_core.c (policy, host-tested) + sched.c
                           (threads, sleep/wake, join, preemption)
+  proc/                   process.c (user processes) + syscall.c (dispatch,
+                          user pointer validation)
   lib/                    freestanding C library: string.c, fmt.c (vsnprintf)
   include/                public kernel headers (bootinfo.h, memlayout.h, ...)
   console.c               console multiplexer (serial + VGA)
@@ -74,11 +77,14 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 6. `kmalloc_init()` — slab heap over PMM frames.
 7. `sched_init()` — the boot context becomes thread 0, the idle thread is created,
    and the scheduler hooks the timer tick (see docs/scheduling.md).
-8. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
+8. `syscall_init()` — SYSCALL/SYSRET MSRs (see docs/userspace.md).
+9. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
    ticks by sleeping on it.
-9. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
-   protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
-10. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
+10. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
+    protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
+11. `process_run_init()` — the embedded userspace init runs in ring 3, syscalls
+    back, and exits; its address space is torn down leak-free.
+12. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)
 

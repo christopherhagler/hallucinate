@@ -19,10 +19,14 @@
 
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/ctx.h>
+#include <arch/x86_64/gdt.h>
+#include <arch/x86_64/paging.h>
 #include <kmalloc.h>
 #include <panic.h>
 #include <sched_core.h>
+#include <syscall.h>
 #include <timer.h>
+#include <vmm.h>
 
 /* 16 KiB kernel stacks. No guard page yet: stacks come from the HHDM
  * where everything is mapped; VMA-based stacks with guards arrive
@@ -33,10 +37,14 @@ static struct sched_core core;
 static struct thread boot_thread; /* adopts the boot stack in sched_init */
 static struct thread *idle_thread;
 static struct thread *current;
+static struct addrspace *active_as; /* what CR3 currently holds */
 static volatile int need_resched;
 static int started;
 static uint64_t next_id;
 static uint64_t nthreads;
+
+/* Boot stack top (entry.asm); thread 0 runs on it. */
+extern char kstack_top[];
 
 static void idle_loop(void *arg) {
     (void)arg;
@@ -67,6 +75,20 @@ static void schedule(void) {
     }
     next->state = THREAD_RUNNING;
     current = next;
+
+    /* Ring 3 entry points must land on the incoming thread's kernel
+     * stack: interrupts via TSS.rsp0, syscalls via syscall_kstack. */
+    gdt_set_rsp0(next->kstack_top);
+    syscall_set_kstack(next->kstack_top);
+
+    /* Kernel threads all share the kernel address space; CR3 only
+     * moves when a user address space enters or leaves the picture. */
+    struct addrspace *as = (next->as != NULL) ? next->as : vmm_kernel_addrspace();
+    if (as != active_as) {
+        paging_activate(as);
+        active_as = as;
+    }
+
     ctx_switch(&prev->rsp, next->rsp);
     /* Now back on `prev`'s stack, some context switches later. */
 }
@@ -122,6 +144,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     *--sp = 0;               /* r14 */
     *--sp = 0;               /* r15 */
     t->rsp = (uint64_t)sp;
+    t->kstack_top = stack_top(t->stack_base);
 
     uint64_t flags = cpu_irq_save();
     t->id = next_id++;
@@ -133,6 +156,17 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
 
 struct thread *thread_current(void) {
     return current;
+}
+
+void sched_set_addrspace(struct addrspace *as) {
+    uint64_t flags = cpu_irq_save();
+    current->as = as;
+    struct addrspace *target = (as != NULL) ? as : vmm_kernel_addrspace();
+    if (target != active_as) {
+        paging_activate(target);
+        active_as = target;
+    }
+    cpu_irq_restore(flags);
 }
 
 void sched_yield(void) {
@@ -207,8 +241,13 @@ void sched_init(void) {
     boot_thread.name = "main";
     boot_thread.state = THREAD_RUNNING;
     boot_thread.id = next_id++;
+    boot_thread.kstack_top = (uint64_t)kstack_top;
     current = &boot_thread;
+    active_as = vmm_kernel_addrspace();
     nthreads = 1;
+
+    gdt_set_rsp0(boot_thread.kstack_top);
+    syscall_set_kstack(boot_thread.kstack_top);
 
     /* The idle thread is created like any other but never enqueued:
      * pull it straight back off the ready queue. */
