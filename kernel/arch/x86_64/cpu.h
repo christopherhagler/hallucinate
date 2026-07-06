@@ -32,6 +32,23 @@ static inline int cpu_interrupts_enabled(void) {
     return (rflags & (1u << 9)) != 0; /* RFLAGS.IF */
 }
 
+/*
+ * Nestable interrupt-off critical sections: capture RFLAGS and
+ * disable, then restore the captured state (which re-enables only if
+ * interrupts were on at entry).
+ */
+static inline uint64_t cpu_irq_save(void) {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(rflags) : : "memory");
+    return rflags;
+}
+
+static inline void cpu_irq_restore(uint64_t rflags) {
+    if (rflags & (1u << 9)) {
+        __asm__ volatile("sti" : : : "memory");
+    }
+}
+
 static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t lo;
     uint32_t hi;

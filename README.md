@@ -28,7 +28,7 @@ Two questions drive the project:
 
 ## Current status
 
-**Phase 2 complete: interrupts and memory management.**
+**Phase 3 complete: preemptive multitasking.**
 
 The system boots from a raw disk image in QEMU: our two-stage BIOS bootloader (A20, E820,
 unreal-mode ELF load, long-mode transition) hands off to a higher-half kernel at
@@ -37,19 +37,23 @@ IST stack, 256-vector IDT with register-dumping exception handlers), takes timer
 keyboard interrupts through a remapped PIC, and manages memory end to end: an
 E820-seeded physical frame allocator, kernel-built page tables with a full physical
 direct map and a W^X kernel image (NX enforced everywhere data lives), and a slab
-`kmalloc`. Every boot runs an in-kernel self-test suite; typing in the QEMU window echoes
-through the keyboard driver.
+`kmalloc`. On top of that runs a preemptive round-robin scheduler: kernel threads with
+their own stacks, a 10 ms timeslice off the timer tick, timed sleep, and pthread-style
+join. Every boot proves it on the serial console — three threads interleaving in perfect
+rotation, a spinning thread failing to monopolize the CPU, and every stack reclaimed:
 
 ```
-Hallucinate OS v0.2.0 (x86_64)
+Hallucinate OS v0.3.0 (x86_64)
 cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked
 e820: 7 entries
 memory: 255 MiB usable
-pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x110000
+pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x113000
 vmm: kernel page tables active, 4096 MiB direct-mapped at 0xffff800000000000
 heap: slab allocator ready
+sched: online, round-robin, 10 ms timeslice
 timer: 100 Hz, ticking (slept 3 ticks)
-selftest: passed (...)
+selftest: sched interleave "abcabcabcabc"
+selftest: passed (701 assertions)
 boot: complete
 ```
 
@@ -60,8 +64,8 @@ boot: complete
 | 0 | Toolchain, build system, test harness | ✅ done |
 | 1 | Two-stage bootloader, long mode, higher-half kernel, consoles | ✅ done |
 | 2 | GDT/IDT, exceptions, timer, physical + virtual memory, kernel heap | ✅ done |
-| 3 | Kernel threads and scheduling | next |
-| 4 | Ring 3 userspace, ELF loader, processes | planned |
+| 3 | Kernel threads and scheduling | ✅ done |
+| 4 | Ring 3 userspace, ELF loader, processes | next |
 | 5 | virtio-blk, VFS, ext2 | planned |
 | 6 | AI service layer: `/dev/ai`, AI daemon, natural-language shell | planned |
 | 7 | Linux syscall compatibility (static musl → busybox → dynamic) | planned |

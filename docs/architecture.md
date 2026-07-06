@@ -6,6 +6,7 @@ exists today and the structure the rest of the roadmap builds on. Companion docu
 
 - [boot-protocol.md](boot-protocol.md) — bootloader ↔ kernel contract (versioned)
 - [memory-map.md](memory-map.md) — physical and virtual address space layout
+- [scheduling.md](scheduling.md) — threads, context switch, preemption
 - [testing.md](testing.md) — the three-level test strategy behind `make check`
 
 ## Design principles
@@ -27,11 +28,14 @@ exists today and the structure the rest of the roadmap builds on. Companion docu
 boot/                     two-stage BIOS bootloader (NASM, flat binaries)
 kernel/
   arch/x86_64/            entry stub, GDT/TSS, IDT + trap dispatch (isr.asm),
-                          IRQ layer, 8259 PIC, 4-level paging, port I/O, CPU intrinsics
+                          IRQ layer, 8259 PIC, 4-level paging, context switch
+                          (ctx.asm), port I/O, CPU intrinsics
   drivers/                serial (16550), VGA text, 8254 PIT, PS/2 keyboard
                           (kbd_map.c: pure scancode translation, host-tested)
   mm/                     pmm_core.c + pmm.c (frame allocator),
                           vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
+  sched/                  sched_core.c (policy, host-tested) + sched.c
+                          (threads, sleep/wake, join, preemption)
   lib/                    freestanding C library: string.c, fmt.c (vsnprintf)
   include/                public kernel headers (bootinfo.h, memlayout.h, ...)
   console.c               console multiplexer (serial + VGA)
@@ -68,11 +72,13 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 5. `vmm_init()` — kernel page tables: HHDM direct map, W^X kernel image, NX, no
    identity map; page-fault handler with error decoding.
 6. `kmalloc_init()` — slab heap over PMM frames.
-7. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
+7. `sched_init()` — the boot context becomes thread 0, the idle thread is created,
+   and the scheduler hooks the timer tick (see docs/scheduling.md).
+8. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
    ticks by sleeping on it.
-8. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
-   protections, and heap.
-9. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
+9. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
+   protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
+10. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)
 

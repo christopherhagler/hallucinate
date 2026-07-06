@@ -8,6 +8,8 @@
  */
 #include <timer.h>
 
+#include <stddef.h>
+
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/io.h>
 #include <arch/x86_64/irq.h>
@@ -23,9 +25,13 @@
 
 static volatile uint64_t ticks;
 static uint32_t configured_hz;
+static timer_tick_fn tick_hook;
 
 static void timer_irq(void) {
     ticks++;
+    if (tick_hook != NULL) {
+        tick_hook(ticks);
+    }
 }
 
 void timer_init(uint32_t hz) {
@@ -53,6 +59,14 @@ uint64_t timer_ticks(void) {
 
 uint64_t timer_uptime_ms(void) {
     return timer_ticks() * 1000u / configured_hz;
+}
+
+void timer_set_tick_hook(timer_tick_fn fn) {
+    KASSERT(fn != NULL);
+    if (tick_hook != NULL) {
+        panic("timer: tick hook already registered");
+    }
+    tick_hook = fn;
 }
 
 void timer_sleep_ticks(uint64_t n) {

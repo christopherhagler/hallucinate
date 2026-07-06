@@ -21,11 +21,12 @@
 #include <memlayout.h>
 #include <panic.h>
 #include <pmm.h>
+#include <sched.h>
 #include <selftest.h>
 #include <timer.h>
 #include <vmm.h>
 
-#define KERNEL_VERSION "0.2.0"
+#define KERNEL_VERSION "0.3.0"
 #define TIMER_HZ       100
 
 static const char *e820_type_name(uint32_t type) {
@@ -96,6 +97,9 @@ void kmain(uint64_t bootinfo_phys) {
     vmm_init(bi);
     kmalloc_init();
     kprintf("heap: slab allocator ready\n");
+
+    sched_init();
+    kprintf("sched: online, round-robin, %u ms timeslice\n", 1000 / TIMER_HZ);
 
     timer_init(TIMER_HZ);
     keyboard_init();

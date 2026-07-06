@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <arch/x86_64/cpu.h>
 #include <arch/x86_64/trap.h>
 #include <compiler.h>
 #include <fmt.h>
@@ -18,7 +19,9 @@
 #include <memlayout.h>
 #include <panic.h>
 #include <pmm.h>
+#include <sched.h>
 #include <string.h>
+#include <timer.h>
 #include <vmm.h>
 
 #include <arch/x86_64/paging.h>
@@ -197,6 +200,102 @@ static void test_heap(void) {
     CHECK(pmm_free_frames() == frames_before);
 }
 
+/* --- scheduler --- */
+
+enum { INTERLEAVE_WORKERS = 3, INTERLEAVE_ROUNDS = 4 };
+static char interleave_log[(INTERLEAVE_WORKERS * INTERLEAVE_ROUNDS) + 1];
+static int interleave_pos;
+
+static void interleave_worker(void *arg) {
+    char tag = (char)(uintptr_t)arg;
+    for (int i = 0; i < INTERLEAVE_ROUNDS; i++) {
+        uint64_t flags = cpu_irq_save();
+        if (interleave_pos < (int)sizeof(interleave_log) - 1) {
+            interleave_log[interleave_pos++] = tag;
+        }
+        cpu_irq_restore(flags);
+        sched_yield();
+    }
+}
+
+static volatile int spinner_stop;
+static volatile uint64_t spinner_count;
+
+static void spinner_worker(void *arg) {
+    (void)arg;
+    while (!spinner_stop) {
+        spinner_count++;
+    }
+}
+
+static void sleeper_worker(void *arg) {
+    uint64_t *slept = arg;
+    uint64_t before = timer_ticks();
+    sched_sleep_ticks(3);
+    *slept = timer_ticks() - before;
+}
+
+static void test_sched(void) {
+    uint64_t threads_before = sched_thread_count();
+    uint64_t objects_before = kmalloc_live_objects();
+
+    /*
+     * Interleave proof: three workers each log their tag then yield,
+     * four rounds. FIFO round-robin guarantees no worker logs twice
+     * in a row (a rare timer preempt can rotate the order, but never
+     * makes two appends by one worker adjacent).
+     */
+    interleave_pos = 0;
+    struct thread *w[INTERLEAVE_WORKERS];
+    /* Create all three atomically: a preempt between creates could
+     * otherwise let the first worker run two rounds unopposed. */
+    uint64_t flags = cpu_irq_save();
+    w[0] = thread_create("ilv-a", interleave_worker, (void *)(uintptr_t)'a');
+    w[1] = thread_create("ilv-b", interleave_worker, (void *)(uintptr_t)'b');
+    w[2] = thread_create("ilv-c", interleave_worker, (void *)(uintptr_t)'c');
+    cpu_irq_restore(flags);
+    for (int i = 0; i < INTERLEAVE_WORKERS; i++) {
+        thread_join(w[i]);
+    }
+    interleave_log[interleave_pos] = '\0';
+    CHECK(interleave_pos == INTERLEAVE_WORKERS * INTERLEAVE_ROUNDS);
+    int counts[INTERLEAVE_WORKERS] = {0};
+    for (int i = 0; i < interleave_pos; i++) {
+        counts[interleave_log[i] - 'a']++;
+        if (i > 0) {
+            CHECK(interleave_log[i] != interleave_log[i - 1]);
+        }
+    }
+    for (int i = 0; i < INTERLEAVE_WORKERS; i++) {
+        CHECK(counts[i] == INTERLEAVE_ROUNDS);
+    }
+    kprintf("selftest: sched interleave \"%s\"\n", interleave_log);
+
+    /* Timed sleep blocks for at least the requested ticks. */
+    uint64_t slept = 0;
+    struct thread *sleeper = thread_create("sleeper", sleeper_worker, &slept);
+    thread_join(sleeper);
+    CHECK(slept >= 3);
+
+    /*
+     * Preemption proof: a worker that never yields cannot monopolize
+     * the CPU — the timer tick puts us back on it. Reaching the
+     * post-sleep CHECKs at all is the proof; the counter shows the
+     * spinner really ran meanwhile.
+     */
+    spinner_stop = 0;
+    spinner_count = 0;
+    struct thread *spinner = thread_create("spinner", spinner_worker, NULL);
+    sched_sleep_ticks(3);
+    CHECK(spinner_count > 0);
+    spinner_stop = 1;
+    thread_join(spinner);
+
+    /* Threads, TCBs, and stacks are all accounted for after joins. */
+    CHECK(sched_thread_count() == threads_before);
+    CHECK(kmalloc_live_objects() == objects_before);
+}
+
 void selftest_run(void) {
     assertions = 0;
     test_string();
@@ -205,5 +304,6 @@ void selftest_run(void) {
     test_pmm();
     test_vmm();
     test_heap();
+    test_sched();
     kprintf("selftest: passed (%d assertions)\n", assertions);
 }

@@ -8,6 +8,7 @@
 #include <arch/x86_64/pic.h>
 #include <arch/x86_64/trap.h>
 #include <panic.h>
+#include <sched.h>
 
 static irq_handler_t handlers[PIC_IRQS];
 static uint64_t spurious_count;
@@ -30,6 +31,15 @@ static void irq_dispatch(struct trapframe *tf) {
     }
     h();
     pic_send_eoi(irq);
+
+    /*
+     * With the PIC satisfied, this is the preemption point: if the
+     * handler made a thread runnable (or the tick ended a timeslice),
+     * switch now. The interrupted thread's trapframe stays parked on
+     * its own kernel stack until it is scheduled back in and returns
+     * through iretq as if nothing happened.
+     */
+    sched_preempt();
 }
 
 void irq_init(void) {

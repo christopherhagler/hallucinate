@@ -20,7 +20,9 @@ PASS_MARKERS = [
     "pmm: ",
     "vmm: kernel page tables active",
     "heap: slab allocator ready",
+    "sched: online",
     "timer: 100 Hz, ticking",
+    "selftest: sched interleave",
     "selftest: passed",
     "boot: complete",
 ]

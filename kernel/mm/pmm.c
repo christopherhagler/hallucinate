@@ -14,6 +14,7 @@
  */
 #include <pmm.h>
 
+#include <arch/x86_64/cpu.h>
 #include <kprintf.h>
 #include <memlayout.h>
 #include <panic.h>
@@ -122,8 +123,12 @@ void pmm_init(const struct bootinfo *bi) {
             (unsigned long long)(bitmap_size >> 10), (unsigned long long)bitmap_phys);
 }
 
+/* The bitmap is shared mutable state and threads preempt each other,
+ * so every core operation runs interrupts-off (single CPU). */
 uint64_t pmm_alloc_frame(void) {
+    uint64_t flags = cpu_irq_save();
     int64_t frame = pmm_core_alloc(&pmm);
+    cpu_irq_restore(flags);
     if (frame < 0) {
         return 0;
     }
@@ -131,7 +136,9 @@ uint64_t pmm_alloc_frame(void) {
 }
 
 uint64_t pmm_alloc_frames(uint64_t count, uint64_t align_frames) {
+    uint64_t flags = cpu_irq_save();
     int64_t frame = pmm_core_alloc_run(&pmm, count, align_frames);
+    cpu_irq_restore(flags);
     if (frame < 0) {
         return 0;
     }
@@ -142,7 +149,10 @@ void pmm_free_frame(uint64_t paddr) {
     if ((paddr & (PAGE_SIZE - 1)) != 0) {
         panic("pmm: freeing unaligned address %#llx", (unsigned long long)paddr);
     }
-    if (pmm_core_free(&pmm, paddr >> PAGE_SHIFT) != 0) {
+    uint64_t flags = cpu_irq_save();
+    int rc = pmm_core_free(&pmm, paddr >> PAGE_SHIFT);
+    cpu_irq_restore(flags);
+    if (rc != 0) {
         panic("pmm: double or invalid free of frame %#llx", (unsigned long long)paddr);
     }
 }
