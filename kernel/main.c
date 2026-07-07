@@ -11,6 +11,7 @@
 #include <arch/x86_64/irq.h>
 #include <arch/x86_64/pic.h>
 #include <arch/x86_64/trap.h>
+#include <block.h>
 #include <bootinfo.h>
 #include <compiler.h>
 #include <console.h>
@@ -20,15 +21,17 @@
 #include <kprintf.h>
 #include <memlayout.h>
 #include <panic.h>
+#include <pci.h>
 #include <pmm.h>
 #include <process.h>
 #include <sched.h>
 #include <selftest.h>
 #include <syscall.h>
 #include <timer.h>
+#include <virtio_blk.h>
 #include <vmm.h>
 
-#define KERNEL_VERSION "0.4.1"
+#define KERNEL_VERSION "0.5.0"
 #define TIMER_HZ       100
 
 static const char *e820_type_name(uint32_t type) {
@@ -114,6 +117,10 @@ void kmain(uint64_t bootinfo_phys) {
     timer_sleep_ticks(3);
     kprintf("timer: %u Hz, ticking (slept %llu ticks)\n", timer_hz(),
             (unsigned long long)(timer_ticks() - start));
+
+    pci_init();
+    virtio_blk_init();
+    block_selftest();
 
     selftest_run();
 

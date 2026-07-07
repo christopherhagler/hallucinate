@@ -28,8 +28,11 @@ Two questions drive the project:
 
 ## Current status
 
-**Phase 4 complete: a real process model — fork, execve, wait — runs in ring 3, with full
-fault isolation.**
+**Phase 5 underway: the kernel has a disk — PCI enumeration, a VIRTIO 1.2 virtio-blk
+driver, and a cached block layer. Next: graphfs, our native graph filesystem.**
+
+Phase 4 delivered a real process model — fork, execve, wait — running in ring 3 with full
+fault isolation.
 
 The system boots from a raw disk image in QEMU: our two-stage BIOS bootloader (A20, E820,
 unreal-mode ELF load, long-mode transition) hands off to a higher-half kernel at
@@ -53,17 +56,37 @@ checks: segment integrity, register preservation across syscalls, every error pa
 (`-ENOSYS`/`-EBADF`/`-EFAULT`/`-ECHILD`/`-ENOENT`), the fork/exec/wait round trip, and
 fault isolation itself.
 
+Phase 5 has begun on the storage stack: the kernel scans the PCI bus, drives a **modern
+virtio-blk device implemented against the VIRTIO 1.2 specification** (capability-based
+transport, split virtqueues with host-tested ring bookkeeping), and reads and writes the
+disk through a write-through block cache — proven at every boot by a write/readback/
+restore self-test against the real device. The filesystem it will carry is not ext2 but
+**graphfs, a from-scratch property-graph filesystem**: files as nodes, typed named edges
+as the structure, the POSIX tree as just one subgraph — the foundation for the AI-native
+semantic layer in Phase 6.
+
 ```
-Hallucinate OS v0.4.1 (x86_64)
+Hallucinate OS v0.5.0 (x86_64)
 cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked
 e820: 7 entries
 memory: 255 MiB usable
-pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x11e000
+pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x121000
 vmm: kernel page tables active, 4096 MiB direct-mapped at 0xffff800000000000
 heap: slab allocator ready
 sched: online, round-robin, 10 ms timeslice
 syscall: SYSCALL/SYSRET ready (Linux x86_64 ABI numbering)
 timer: 100 Hz, ticking (slept 3 ticks)
+pci: 00:00.0 8086:1237 class 06.00
+pci: 00:01.0 8086:7000 class 06.01
+pci: 00:01.1 8086:7010 class 01.01
+pci: 00:01.3 8086:7113 class 06.80
+pci: 00:02.0 1234:1111 class 03.00
+pci: 00:03.0 8086:100e class 02.00
+pci: 00:04.0 1af4:1042 class 01.00
+pci: 7 functions
+virtio-blk: 16 MiB (32768 sectors), queue size 128
+block: virtio-blk, 16 MiB (4096 blocks of 4096), cache 256 KiB
+block: selftest passed (write/readback/restore)
 selftest: sched interleave "abcabcabcabc"
 selftest: passed (701 assertions)
 user: launching init (embedded ELF, 13416 bytes)
@@ -87,7 +110,7 @@ boot: complete
 | 2 | GDT/IDT, exceptions, timer, physical + virtual memory, kernel heap | ✅ done |
 | 3 | Kernel threads and scheduling | ✅ done |
 | 4 | Ring 3 userspace, ELF loader, processes | ✅ done |
-| 5 | virtio-blk, VFS, ext2 | planned |
+| 5 | virtio-blk, VFS, graphfs — our native graph filesystem | 🔨 in progress |
 | 6 | AI service layer: `/dev/ai`, AI daemon, natural-language shell | planned |
 | 7 | Linux syscall compatibility (static musl → busybox → dynamic) | planned |
 | 8 | Framebuffer GUI with AI-integrated command palette | planned |
@@ -124,7 +147,7 @@ test.
 
 ```
 boot/        stage1.asm (MBR), stage2.asm (A20, E820, long mode, ELF loader)
-kernel/      the kernel: arch/x86_64/, drivers/, mm/, sched/, proc/, lib/, and core
+kernel/      the kernel: arch/x86_64/, drivers/, block/, mm/, sched/, proc/, lib/, and core
 user/        userspace: init.c, crt0.asm, syscall wrappers, linker script
 tools/       mkimage.py — assembles and validates the disk image
 tests/       host unit tests and the QEMU boot harness

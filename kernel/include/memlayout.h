@@ -24,6 +24,11 @@
 #define HHDM_BASE         0xffff800000000000ull
 #define BOOT_MAPPED_LIMIT 0x40000000ull /* 1 GiB */
 
+/* The direct map always covers at least the first 4 GiB (RAM plus the
+ * legacy/MMIO window), so device BARs below this are reachable via
+ * phys_to_virt(). Established by vmm_init(). */
+#define MMIO_LIMIT 0x100000000ull
+
 /* End of user virtual addresses (the canonical lower half); user
  * mappings and user-supplied pointers must sit strictly below it. */
 #define USER_VA_LIMIT 0x0000800000000000ull

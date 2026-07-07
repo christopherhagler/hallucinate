@@ -33,8 +33,7 @@ extern char _kernel_end[];
 /* Boot alias until vmm_init() installs the real direct map. */
 uint64_t hhdm_base = KERNEL_VMA;
 
-#define SIZE_2M    0x200000ull
-#define MMIO_LIMIT 0x100000000ull /* always direct-map the first 4 GiB */
+#define SIZE_2M 0x200000ull
 
 #define EFER_MSR 0xC0000080u
 #define EFER_NXE (1ull << 11)

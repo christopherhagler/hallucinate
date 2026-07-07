@@ -111,9 +111,21 @@ $(BUILD)/disk.img: $(BUILD)/boot/stage1.bin $(BUILD)/boot/stage2.bin \
 	    --kernel $(BUILD)/kernel.elf \
 	    --out $@
 
+# The filesystem disk, attached as a modern virtio-blk device (the
+# boot disk stays on the BIOS/INT13 path). Scratch zeros until
+# mkgraphfs.py lands in slice 5b.
+FS_IMG_MIB := 16
+$(BUILD)/fs.img:
+	@mkdir -p $(BUILD)
+	$(PY) -c "open('$@','wb').write(bytes($(FS_IMG_MIB)*1024*1024))"
+
+QEMU_FLAGS := -m 256M -drive file=$(BUILD)/disk.img,format=raw \
+    -drive file=$(BUILD)/fs.img,format=raw,if=none,id=fsdisk \
+    -device virtio-blk-pci,drive=fsdisk,disable-legacy=on
+
 .PHONY: run
-run: $(BUILD)/disk.img
-	$(QEMU) -m 256M -drive file=$<,format=raw -serial stdio
+run: $(BUILD)/disk.img $(BUILD)/fs.img
+	$(QEMU) $(QEMU_FLAGS) -serial stdio
 
 # -------------------------------------------------------------- host tests --
 
@@ -134,17 +146,17 @@ HOST_CFLAGS := -std=c11 -Wall -Wextra -Werror -g -O1 \
 HOST_TEST_SRCS := tests/host/test_main.c tests/host/test_string.c \
     tests/host/test_fmt.c tests/host/test_kbd.c tests/host/test_pmm.c \
     tests/host/test_heap.c tests/host/test_sched.c tests/host/test_elf64.c \
-    tests/host/test_proc.c \
+    tests/host/test_proc.c tests/host/test_virtq.c \
     kernel/lib/string.c kernel/lib/fmt.c kernel/drivers/kbd_map.c \
     kernel/mm/pmm_core.c kernel/mm/heap_core.c kernel/sched/sched_core.c \
-    kernel/lib/elf64.c kernel/proc/proc_core.c
+    kernel/lib/elf64.c kernel/proc/proc_core.c kernel/drivers/virtq_core.c
 
 $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
                      kernel/include/string.h kernel/include/fmt.h \
                      kernel/include/kbd_map.h kernel/include/pmm_core.h \
                      kernel/include/heap_core.h kernel/include/sched_core.h \
                      kernel/include/thread.h kernel/include/elf64.h \
-                     kernel/include/proc_core.h
+                     kernel/include/proc_core.h kernel/include/virtq_core.h
 	@mkdir -p $(BUILD)
 	$(CC) $(HOST_CFLAGS) $(HOST_TEST_SRCS) -o $@
 
@@ -157,8 +169,9 @@ check: check-host check-boot
 check-host: $(BUILD)/host_tests
 	$(BUILD)/host_tests
 
-check-boot: $(BUILD)/disk.img tests/run_qemu.py
-	$(PY) tests/run_qemu.py --image $(BUILD)/disk.img --qemu $(QEMU)
+check-boot: $(BUILD)/disk.img $(BUILD)/fs.img tests/run_qemu.py
+	$(PY) tests/run_qemu.py --image $(BUILD)/disk.img --fsimg $(BUILD)/fs.img \
+	    --qemu $(QEMU)
 
 # ------------------------------------------------------------ code quality --
 

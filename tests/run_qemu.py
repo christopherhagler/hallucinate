@@ -8,8 +8,11 @@ diagnosis.
 """
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -23,6 +26,9 @@ PASS_MARKERS = [
     "sched: online",
     "syscall: SYSCALL/SYSRET ready",
     "timer: 100 Hz, ticking",
+    "pci: ",
+    "virtio-blk: ",
+    "block: selftest passed",
     "selftest: sched interleave",
     "selftest: passed",
     "hello from ring 3",
@@ -45,6 +51,7 @@ FAIL_PATTERNS = [
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--image", required=True)
+    ap.add_argument("--fsimg", help="filesystem image, attached as virtio-blk")
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--qemu", default="qemu-system-x86_64")
     args = ap.parse_args()
@@ -58,6 +65,19 @@ def main() -> int:
         "-monitor", "none",
         "-no-reboot",
     ]
+
+    # The guest writes to the fs disk (block selftest, later the
+    # filesystem), so boot a throwaway copy and keep the build
+    # artifact pristine.
+    fs_copy = None
+    if args.fsimg:
+        fs_copy = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        fs_copy.close()
+        shutil.copyfile(args.fsimg, fs_copy.name)
+        cmd += [
+            "-drive", f"file={fs_copy.name},format=raw,if=none,id=fsdisk",
+            "-device", "virtio-blk-pci,drive=fsdisk,disable-legacy=on",
+        ]
 
     proc = subprocess.Popen(
         cmd,
@@ -110,6 +130,9 @@ def main() -> int:
     proc.kill()
     proc.wait()
     t.join(timeout=2)
+
+    if fs_copy is not None:
+        os.unlink(fs_copy.name)
 
     with lock:
         text = transcript.decode("utf-8", errors="replace")

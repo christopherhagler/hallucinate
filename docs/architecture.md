@@ -8,6 +8,7 @@ exists today and the structure the rest of the roadmap builds on. Companion docu
 - [memory-map.md](memory-map.md) — physical and virtual address space layout
 - [scheduling.md](scheduling.md) — threads, context switch, preemption
 - [userspace.md](userspace.md) — ring 3, syscall ABI, ELF loading, the process model
+- [storage.md](storage.md) — PCI, virtio-blk, the block layer
 - [testing.md](testing.md) — the three-level test strategy behind `make check`
 
 ## Design principles
@@ -32,7 +33,12 @@ kernel/
                           IRQ layer, 8259 PIC, 4-level paging, context switch
                           (ctx.asm), port I/O, CPU intrinsics
   drivers/                serial (16550), VGA text, 8254 PIT, PS/2 keyboard
-                          (kbd_map.c: pure scancode translation, host-tested)
+                          (kbd_map.c: pure scancode translation, host-tested),
+                          pci.c (bus scan, config space), virtio_pci.c
+                          (VIRTIO 1.2 modern transport), virtq_core.c (pure
+                          split-ring bookkeeping, host-tested), virtio_blk.c
+  block/                  block device layer: 4 KiB blocks, write-through
+                          LRU cache over the registered driver
   mm/                     pmm_core.c + pmm.c (frame allocator),
                           vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
   sched/                  sched_core.c (policy, host-tested) + sched.c
@@ -85,16 +91,19 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 8. `syscall_init()` — SYSCALL/SYSRET MSRs (see docs/userspace.md).
 9. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
    ticks by sleeping on it.
-10. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
+10. `pci_init()` / `virtio_blk_init()` / `block_selftest()` — bus scan, virtio-blk
+    bring-up per VIRTIO 1.2, and a write/readback/restore round trip through the real
+    device (see docs/storage.md).
+11. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
     protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
-11. `process_run_init()` — the embedded init ELF is validated and loaded into a
+12. `process_run_init()` — the embedded init ELF is validated and loaded into a
     fresh user address space and runs in ring 3 as pid 1. Init exercises the
     whole process model — it forks, the child execve()s a second embedded
     program, init reaps it with wait4, and two deliberately crashed children
     prove that a ring 3 fault kills only the faulting process — then exits;
     the kernel verifies the process table is empty and not one physical frame
     leaked.
-12. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
+13. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)
 
