@@ -235,11 +235,17 @@ int process_getpid(void) {
     return thread_current()->pid;
 }
 
-NORETURN void process_exit(int status) {
+/*
+ * The one way out of a process: record the Linux wait status in the
+ * table, wake a parent blocked in wait4, and end the hosting thread.
+ * The table holds the *encoded* wstatus (WIFEXITED/WIFSIGNALED
+ * vocabulary), decided by the caller.
+ */
+static NORETURN void proc_die(int wstatus) {
     uint64_t flags = cpu_irq_save();
     int pid = thread_current()->pid;
     KASSERT(pid > 0);
-    int ppid = proc_exit(&ptable, pid, status);
+    int ppid = proc_exit(&ptable, pid, wstatus);
     if (ppid > 0) {
         struct proc_entry *parent = proc_find(&ptable, ppid);
         if (parent != NULL && parent->state == PROC_LIVE) {
@@ -253,6 +259,17 @@ NORETURN void process_exit(int status) {
     }
     (void)flags; /* the thread dies; interrupt state dies with it */
     thread_exit();
+}
+
+NORETURN void process_exit(int status) {
+    proc_die((status & 0xFF) << 8); /* WIFEXITED encoding */
+}
+
+NORETURN void process_kill(int sig) {
+    int pid = thread_current()->pid;
+    KASSERT(pid > 0);
+    kprintf("user: pid %d (%s) killed by signal %d\n", pid, pstate_of(pid)->name, sig);
+    proc_die(sig & 0x7F); /* WIFSIGNALED encoding */
 }
 
 long process_fork(const struct syscall_frame *parent_frame) {
@@ -428,8 +445,8 @@ long process_wait4(int pid_arg, uint64_t uwstatus, int options, uint64_t urusage
             cpu_irq_restore(flags);
 
             if (uwstatus != 0) {
-                int wstatus = (status & 0xFF) << 8; /* WIFEXITED encoding */
-                if (user_copy_to(uwstatus, &wstatus, sizeof(wstatus)) != 0) {
+                /* The table already holds the encoded wstatus. */
+                if (user_copy_to(uwstatus, &status, sizeof(status)) != 0) {
                     return -EFAULT;
                 }
             }
@@ -475,12 +492,15 @@ void process_run_init(void) {
     if (proc_count(&ptable) != 1) {
         panic("process: init exited leaving %d processes", proc_count(&ptable) - 1);
     }
-    int status = e->exit_status;
+    int wstatus = e->exit_status;
     paging_user_destroy(&p->as);
     proc_reap(&ptable, pid);
 
     if (pmm_free_frames() != frames_before) {
         panic("process: init leaked %lld frames", (long long)(frames_before - pmm_free_frames()));
     }
-    kprintf("user: init exited (status %d)\n", status);
+    if ((wstatus & 0x7F) != 0) { /* WIFSIGNALED: init must never fault */
+        panic("process: init killed by signal %d", wstatus & 0x7F);
+    }
+    kprintf("user: init exited (status %d)\n", wstatus >> 8);
 }

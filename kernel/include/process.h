@@ -26,8 +26,15 @@ struct syscall_frame;
 void process_run_init(void);
 
 /* Terminate the calling process (from SYS_exit): zombie in the
- * table, parent woken, hosting thread ends. */
+ * table, parent woken, hosting thread ends. The wait status is the
+ * Linux "exited" encoding, (status & 0xff) << 8. */
 NORETURN void process_exit(int status);
+
+/* Terminate the calling process because of a hardware fault (called
+ * from the trap path with interrupts off). Same exit machinery as
+ * process_exit, but the wait status is the Linux "killed by signal"
+ * encoding, sig & 0x7f, and a diagnostic names the victim. */
+NORETURN void process_kill(int sig);
 
 /* fork(): clone the calling process — address space copied eagerly,
  * user context copied from the parent's syscall frame with rax = 0.
@@ -46,9 +53,10 @@ long process_execve(struct syscall_frame *frame, uint64_t upath, uint64_t uargv,
 /*
  * wait4(pid, wstatus, options, rusage): reap a zombie child (pid > 0
  * exact, -1 any), blocking until one exits. Writes the Linux wait
- * status encoding ((exit_status & 0xff) << 8) to *wstatus when
- * non-NULL. options must be 0 and rusage NULL (no process groups or
- * accounting yet). Returns the reaped pid, -ECHILD, -EINVAL or
+ * status to *wstatus when non-NULL: (code & 0xff) << 8 for a normal
+ * exit, the signal number for a fault kill (WIFEXITED/WIFSIGNALED
+ * semantics). options must be 0 and rusage NULL (no process groups
+ * or accounting yet). Returns the reaped pid, -ECHILD, -EINVAL or
  * -EFAULT.
  */
 long process_wait4(int pid_arg, uint64_t uwstatus, int options, uint64_t urusage);

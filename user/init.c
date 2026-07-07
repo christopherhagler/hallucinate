@@ -9,11 +9,13 @@
  * ABI, and the process model: it deliberately places state in .text,
  * .rodata, .data, and .bss (PT_LOAD-covered sections with distinct
  * permissions) and verifies all of it, verifies every syscall result
- * the kernel can produce today, then forks a child that execs
- * /bin/hello and reaps it. The exit status is the report: 0 means
- * every check passed, any other value names the first failed check.
- * The kernel prints the status and the boot integration test asserts
- * on it.
+ * the kernel can produce today, forks a child that execs /bin/hello
+ * and reaps it, and proves fault isolation — children that touch
+ * kernel memory or execute an illegal instruction die with the right
+ * signal while everything else keeps running. The exit status is the
+ * report: 0 means every check passed, any other value names the
+ * first failed check. The kernel prints the status and the boot
+ * integration test asserts on it.
  */
 #include <stdint.h>
 
@@ -120,6 +122,33 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     /* execve of a nonexistent program fails cleanly. */
     if (sys_execve("/bin/nonesuch", 0, 0) != -2 /* -ENOENT */) {
         return 16;
+    }
+
+    /* Fault isolation: a child that pokes kernel memory dies with
+     * SIGSEGV (11) — the kernel and everyone else keep running. */
+    pid = sys_fork();
+    if (pid < 0) {
+        return 17;
+    }
+    if (pid == 0) {
+        *(volatile long *)0xFFFFFFFF80000000 = 1; /* kernel image base */
+        sys_exit(101);                            /* only reached if the fault did not kill us */
+    }
+    if (sys_wait4(-1, &wstatus, 0) != pid || wstatus != 11 /* SIGSEGV */) {
+        return 18;
+    }
+
+    /* An illegal instruction dies with SIGILL (4). */
+    pid = sys_fork();
+    if (pid < 0) {
+        return 19;
+    }
+    if (pid == 0) {
+        __asm__ volatile("ud2");
+        sys_exit(102); /* unreachable */
+    }
+    if (sys_wait4(-1, &wstatus, 0) != pid || wstatus != 4 /* SIGILL */) {
+        return 20;
     }
 
     /* Patch the report in .data before printing it: proves the

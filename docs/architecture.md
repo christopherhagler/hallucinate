@@ -90,8 +90,10 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 11. `process_run_init()` — the embedded init ELF is validated and loaded into a
     fresh user address space and runs in ring 3 as pid 1. Init exercises the
     whole process model — it forks, the child execve()s a second embedded
-    program, and init reaps it with wait4 — then exits; the kernel verifies
-    the process table is empty and not one physical frame leaked.
+    program, init reaps it with wait4, and two deliberately crashed children
+    prove that a ring 3 fault kills only the faulting process — then exits;
+    the kernel verifies the process table is empty and not one physical frame
+    leaked.
 12. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)

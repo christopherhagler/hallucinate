@@ -11,6 +11,8 @@
 #include <compiler.h>
 #include <kprintf.h>
 #include <panic.h>
+#include <process.h>
+#include <signal.h>
 
 struct idt_gate {
     uint16_t offset_lo;
@@ -97,8 +99,56 @@ trap_handler_t trap_register(uint8_t vector, trap_handler_t handler) {
     return prev;
 }
 
+/* The signal a fault delivers to the offending process (the Linux
+ * x86 mapping for the exceptions user code can raise). */
+static int exception_signal(uint64_t vector) {
+    switch (vector) {
+    case 1: /* #DB */
+    case 3: /* #BP */
+        return SIGTRAP;
+    case 6: /* #UD */
+        return SIGILL;
+    case 0:  /* #DE */
+    case 7:  /* #NM: no user FPU state support yet */
+    case 16: /* #MF */
+    case 19: /* #XM */
+        return SIGFPE;
+    case 11: /* #NP */
+    case 12: /* #SS */
+    case 17: /* #AC */
+        return SIGBUS;
+    default: /* #GP, #PF, and everything else memory-shaped */
+        return SIGSEGV;
+    }
+}
+
+/*
+ * An exception raised in ring 3 is the process's fault, never the
+ * kernel's: log one diagnostic line and kill the process — the
+ * kernel and every other process keep running. Only machine-level
+ * events (NMI, #DF, #MC) are excluded; those indicate hardware or
+ * kernel trouble regardless of what was interrupted. Does not return
+ * when it takes the fault (process_kill ends the thread).
+ */
+static void user_fault_check(const struct trapframe *tf) {
+    if (tf->vector >= 32 || (tf->cs & 3) != 3) {
+        return;
+    }
+    if (tf->vector == 2 || tf->vector == VEC_DOUBLE_FAULT || tf->vector == 18) {
+        return;
+    }
+    kprintf("trap: user fault: %s at rip=%#llx (error %#llx", exception_names[tf->vector],
+            (unsigned long long)tf->rip, (unsigned long long)tf->error);
+    if (tf->vector == VEC_PAGE_FAULT) {
+        kprintf(", cr2=%#llx", (unsigned long long)read_cr2());
+    }
+    kprintf(")\n");
+    process_kill(exception_signal(tf->vector));
+}
+
 /* Called from isr.asm for every interrupt and exception. */
 void trap_dispatch(struct trapframe *tf) {
+    user_fault_check(tf);
     trap_handler_t h = handlers[tf->vector];
     if (h != NULL) {
         h(tf);

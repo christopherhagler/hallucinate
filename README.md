@@ -28,7 +28,8 @@ Two questions drive the project:
 
 ## Current status
 
-**Phase 4 nearly complete: a real process model — fork, execve, wait — runs in ring 3.**
+**Phase 4 complete: a real process model — fork, execve, wait — runs in ring 3, with full
+fault isolation.**
 
 The system boots from a raw disk image in QEMU: our two-stage BIOS bootloader (A20, E820,
 unreal-mode ELF load, long-mode transition) hands off to a higher-half kernel at
@@ -44,16 +45,20 @@ by a host-tested loader, mapped into per-process address spaces with per-segment
 permissions, talking back through `syscall` using the Linux x86_64 ABI convention. Init
 **forks a child, the child execve()s a second program (argv delivered on a proper SysV
 stack), and init reaps it with wait4** — the boot below shows both programs printing
-from ring 3. Init's exit status 0 asserts sixteen checks: segment integrity, register
-preservation across syscalls, every error path (`-ENOSYS`/`-EBADF`/`-EFAULT`/`-ECHILD`/
-`-ENOENT`), and the fork/exec/wait round trip itself.
+from ring 3. A faulting process dies alone: a hardware exception in ring 3 kills that
+process with the matching Linux signal (`SIGSEGV`, `SIGILL`, ...), reported to the parent
+through wait4, while the kernel and every other process keep running — the boot below
+shows two deliberately crashed children being reaped. Init's exit status 0 asserts twenty
+checks: segment integrity, register preservation across syscalls, every error path
+(`-ENOSYS`/`-EBADF`/`-EFAULT`/`-ECHILD`/`-ENOENT`), the fork/exec/wait round trip, and
+fault isolation itself.
 
 ```
-Hallucinate OS v0.4.0 (x86_64)
+Hallucinate OS v0.4.1 (x86_64)
 cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked
 e820: 7 entries
 memory: 255 MiB usable
-pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x11d000
+pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x11e000
 vmm: kernel page tables active, 4096 MiB direct-mapped at 0xffff800000000000
 heap: slab allocator ready
 sched: online, round-robin, 10 ms timeslice
@@ -61,9 +66,13 @@ syscall: SYSCALL/SYSRET ready (Linux x86_64 ABI numbering)
 timer: 100 Hz, ticking (slept 3 ticks)
 selftest: sched interleave "abcabcabcabc"
 selftest: passed (701 assertions)
-user: launching init (embedded ELF, 13344 bytes)
+user: launching init (embedded ELF, 13416 bytes)
 hello from ring 3
 hello from execve
+trap: user fault: #PF page fault at rip=0x400444 (error 0x6, cr2=0xffffffff80000000)
+user: pid 3 (/bin/init) killed by signal 11
+trap: user fault: #UD invalid opcode at rip=0x400434 (error 0)
+user: pid 4 (/bin/init) killed by signal 4
 user: C init: .data .bss .rodata ok
 user: init exited (status 0)
 boot: complete
@@ -77,7 +86,7 @@ boot: complete
 | 1 | Two-stage bootloader, long mode, higher-half kernel, consoles | ✅ done |
 | 2 | GDT/IDT, exceptions, timer, physical + virtual memory, kernel heap | ✅ done |
 | 3 | Kernel threads and scheduling | ✅ done |
-| 4 | Ring 3 userspace, ELF loader, processes | 🔨 in progress |
+| 4 | Ring 3 userspace, ELF loader, processes | ✅ done |
 | 5 | virtio-blk, VFS, ext2 | planned |
 | 6 | AI service layer: `/dev/ai`, AI daemon, natural-language shell | planned |
 | 7 | Linux syscall compatibility (static musl → busybox → dynamic) | planned |

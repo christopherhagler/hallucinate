@@ -77,6 +77,8 @@ static void map_kernel_section(const char *start, const char *end, uint64_t flag
     }
 }
 
+/* Ring 3 page faults kill the process in trap_dispatch and never get
+ * here; a fault in kernel mode is always a kernel bug. */
 static void page_fault_handler(struct trapframe *tf) {
     uint64_t addr = read_cr2();
     trap_dump(tf);

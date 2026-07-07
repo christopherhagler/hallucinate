@@ -28,7 +28,7 @@
 #include <timer.h>
 #include <vmm.h>
 
-#define KERNEL_VERSION "0.4.0"
+#define KERNEL_VERSION "0.4.1"
 #define TIMER_HZ       100
 
 static const char *e820_type_name(uint32_t type) {

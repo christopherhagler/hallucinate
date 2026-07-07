@@ -3,10 +3,13 @@
  *
  * Every interrupt and exception funnels through the stubs in isr.asm
  * into trap_dispatch() with a struct trapframe describing the
- * interrupted context. Handlers are registered per vector; a vector
- * with no handler is fatal (exceptions dump state and panic, stray
- * interrupts panic outright — the PIC is fully masked until a driver
- * unmasks its line and registers a handler first).
+ * interrupted context. An exception raised in ring 3 (except NMI,
+ * #DF, #MC) kills the offending process with the matching signal
+ * and never reaches a handler. Otherwise handlers are registered per
+ * vector; a vector with no handler is fatal (exceptions dump state
+ * and panic, stray interrupts panic outright — the PIC is fully
+ * masked until a driver unmasks its line and registers a handler
+ * first).
  */
 #pragma once
 

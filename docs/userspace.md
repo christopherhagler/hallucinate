@@ -143,10 +143,21 @@ The lifecycle syscalls:
   the hosting thread.
 - **`wait4`** finds a matching child (exact pid or `-1` for any): a zombie
   is reaped — join the hosting thread, destroy the address space, free the
-  table slot, deliver `(status & 0xff) << 8` (Linux `WIFEXITED` encoding);
-  otherwise the parent publishes itself as the waiter and blocks. The check
-  and the block happen in one interrupts-off section, so a child exiting
-  concurrently cannot slip through unnoticed.
+  table slot, deliver the Linux wait status (`(code & 0xff) << 8` for a
+  normal exit, the signal number for a fault kill — `WIFEXITED` /
+  `WIFSIGNALED` semantics); otherwise the parent publishes itself as the
+  waiter and blocks. The check and the block happen in one interrupts-off
+  section, so a child exiting concurrently cannot slip through unnoticed.
+
+A hardware exception raised in ring 3 is never the kernel's problem: the
+trap dispatcher logs one diagnostic line (exception, `rip`, error code,
+`cr2` for page faults) and **kills the offending process** with the Linux
+signal for that exception (`#PF`/`#GP` → `SIGSEGV`, `#UD` → `SIGILL`,
+`#DE`/`#MF`/`#XM` → `SIGFPE`, ...), delivered to the parent through
+`wait4`. The kernel and every other process keep running. Only
+machine-level events (NMI, double fault, machine check) still panic, as
+does any fault taken in kernel mode — that is a kernel bug by definition.
+If init itself dies by signal, the kernel panics, Unix style.
 
 New images start with the System V ABI stack contract: `[argc, argv...,
 NULL, envp..., NULL, AT_NULL]` at a 16-byte-aligned `rsp`, string bytes
@@ -180,13 +191,16 @@ user: init exited (status 0)
 
 Init doubles as the acceptance test for the loader, the ABI, and the
 process model. Its exit status names the first failed check; 0 means all
-sixteen passed: `write` returns the full length, `.bss` zero-filled, `.data`
+twenty passed: `write` returns the full length, `.bss` zero-filled, `.data`
 initialized and writable, `getpid`, `-ENOSYS`/`-EBADF`/`-EFAULT` error
-paths, all six argument registers surviving a syscall, and the full process
+paths, all six argument registers surviving a syscall, the full process
 round trip — `fork` returns a fresh pid, the child `execve`s `/bin/hello`
 (which verifies its own argv arrived intact and exits 42), `wait4` returns
-that pid with status `42 << 8`, a second `wait4` returns `-ECHILD`, and
-`execve` of an unknown path returns `-ENOENT`. After init is reaped, the
+that pid with status `42 << 8`, a second `wait4` returns `-ECHILD`,
+`execve` of an unknown path returns `-ENOENT` — and fault isolation: a
+forked child that writes to a kernel address is killed with `SIGSEGV`, one
+that executes an illegal instruction with `SIGILL`, both observed through
+`wait4` while everything else keeps running. After init is reaped, the
 kernel asserts the process table is empty and that the physical frame count
 matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
 
@@ -195,12 +209,10 @@ matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
 - Static `ET_EXEC` only; `ET_DYN`/interpreters are Phase 7 territory.
 - `execve` loads from a built-in program table; real paths arrive with the
   VFS (Phase 5).
-- A user-mode fault (e.g. touching a kernel address) currently panics the
-  kernel via the trap path instead of killing the process — the next
-  hardening step.
 - `fork` copies eagerly; no copy-on-write yet.
 - `wait4` supports options 0 and a NULL rusage only; no `WNOHANG`, no
-  process groups, no signals.
+  process groups. No signal *delivery* exists yet — signal numbers appear
+  only as fault-kill wait statuses.
 - No SMEP/SMAP yet; the kernel relies on paging permissions plus pointer
   validation.
 - The kernel does not save FPU/SSE state, so user code is built `-mno-sse`
