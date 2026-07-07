@@ -19,11 +19,21 @@ syscall_entry:
     mov [rel saved_user_rsp], rsp
     mov rsp, [rel syscall_kstack]
 
-    ; Kernel stack tops are 16-aligned; four pushes keep RSP 16-aligned
-    ; at the call below, as the ABI requires.
+    ; The syscall ABI promises userspace that only rax (result), rcx,
+    ; and r11 (hardware-clobbered) change across a syscall — so every
+    ; caller-saved register the C dispatch may trash is preserved here.
+    ; Callee-saved registers survive through the C ABI itself. Kernel
+    ; stack tops are 16-aligned; ten pushes keep RSP 16-aligned at the
+    ; call below, as the ABI requires.
     push qword [rel saved_user_rsp]
     push rcx                    ; user rip
     push r11                    ; user rflags
+    push rdi
+    push rsi
+    push rdx
+    push r10
+    push r8
+    push r9
     push qword 0                ; alignment slot
 
     ; Re-permit interrupts: syscalls may block or be preempted.
@@ -42,6 +52,12 @@ syscall_entry:
     ; user memory, a kernel-stack-less interrupt window must not exist.
     cli
     add rsp, 8                  ; drop the alignment slot
+    pop r9
+    pop r8
+    pop r10
+    pop rdx
+    pop rsi
+    pop rdi
     pop r11                     ; user rflags (restored by sysret)
     pop rcx                     ; user rip
     pop rsp                     ; user stack

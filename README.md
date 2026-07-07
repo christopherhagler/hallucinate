@@ -43,8 +43,9 @@ statically linked **ELF64 executable, written in C**, is validated by a host-tes
 loader, mapped into its own address space with per-segment W^X permissions, and dropped
 into ring 3, talking back through `syscall` using the Linux x86_64 ABI convention. The
 two `user:`-prefixed lines below are printed by that C program; its exit status 0
-asserts eleven checks — zero-filled `.bss`, initialized writable `.data`, `getpid()`,
-and the `-ENOSYS`/`-EBADF`/`-EFAULT` error paths among them.
+asserts ten checks — zero-filled `.bss`, initialized writable `.data`, `getpid()`,
+registers preserved across syscalls, and the `-ENOSYS`/`-EBADF`/`-EFAULT` error paths
+among them.
 
 ```
 Hallucinate OS v0.3.0 (x86_64)

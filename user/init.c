@@ -30,6 +30,28 @@ static unsigned long str_len(const char *s) {
     return n;
 }
 
+/*
+ * The ABI promises that a syscall changes only rax (and rcx/r11 by
+ * hardware). Prove it for every caller-saved argument register: the
+ * "+" constraints make the compiler read the registers back instead
+ * of assuming the asm preserved them.
+ */
+static int regs_survive_syscall(void) {
+    long rdi = 0x1111;
+    long rsi = 0x2222;
+    long rdx = 0x3333;
+    register long r10 __asm__("r10") = 0x4444;
+    register long r8 __asm__("r8") = 0x5555;
+    register long r9 __asm__("r9") = 0x6666;
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret), "+D"(rdi), "+S"(rsi), "+d"(rdx), "+r"(r10), "+r"(r8), "+r"(r9)
+                     : "a"((long)SYS_getpid)
+                     : "rcx", "r11", "memory");
+    return ret == 1 && rdi == 0x1111 && rsi == 0x2222 && rdx == 0x3333 && r10 == 0x4444 &&
+           r8 == 0x5555 && r9 == 0x6666;
+}
+
 /* Called from crt0.asm; tidy cannot see assembly references. */
 int main(void) { /* NOLINT(misc-use-internal-linkage) */
     /* write() returns the full length. */
@@ -67,6 +89,11 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     /* An unmapped user pointer reports -EFAULT, untouched. */
     if (sys_write(1, (const void *)0x1234000, 1) != -EFAULT) {
         return 8;
+    }
+    /* Caller-saved registers survive a syscall (the kernel restores
+     * the full set; only rax/rcx/r11 may change). */
+    if (!regs_survive_syscall()) {
+        return 10;
     }
     /* Patch the report in .data before printing it: proves the
      * write() source really is our mutable data segment. */

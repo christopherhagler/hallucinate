@@ -18,6 +18,7 @@ register convention, and one error vocabulary with native code.
 | arguments | `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` |
 | return | `rax`; errors are `-errno` (see `kernel/include/errno.h`) |
 | clobbered | `rcx` (return RIP), `r11` (RFLAGS) — hardware behavior |
+| preserved | every other register — the entry stub saves and restores the full caller-saved set; callee-saved registers survive through the C ABI |
 | unimplemented | `-ENOSYS`, always |
 
 Implemented today (numbers from the Linux x86_64 table):
@@ -40,9 +41,13 @@ caller's address space. Anything else returns `-EFAULT` without being touched.
 *user* stack pointer with interrupts masked by SFMASK (`IF|TF|DF|AC`). It
 parks the user RSP, adopts the current thread's kernel stack from a global the
 scheduler maintains on every context switch (single CPU; `swapgs` + per-CPU
-state arrive with SMP), re-enables interrupts — syscalls may block or be
-preempted — and calls `syscall_dispatch()`. The return path disables
-interrupts, restores the user RSP/RIP/RFLAGS, and `sysret`s.
+state arrive with SMP), saves every caller-saved user register (the ABI
+promises they survive; the C dispatch would trash them), re-enables
+interrupts — syscalls may block or be preempted — and calls
+`syscall_dispatch()`. The return path disables interrupts, restores the
+saved registers and the user RSP/RIP/RFLAGS, and `sysret`s. Init asserts
+this contract at boot: it issues a syscall with sentinel values in all six
+argument registers and verifies them afterwards.
 
 MSR setup (`usermode.c`): `EFER.SCE`, `STAR` (selector layout in `gdt.h` was
 designed for SYSRET's `+8/+16` selector math back in Phase 2), `LSTAR` →
@@ -133,8 +138,9 @@ status names the first failed check; 0 means all of: `write` returned the
 full length, `.bss` arrived zero-filled, `.data` arrived initialized and
 writable (the second output line is patched in `.data` before printing),
 `getpid` returned 1, syscall 999 returned `-ENOSYS`, fd 7 returned `-EBADF`,
-and an unmapped pointer returned `-EFAULT`. The QEMU integration test asserts
-all three lines.
+an unmapped pointer returned `-EFAULT`, and all six argument registers
+survived a syscall unchanged. The QEMU integration test asserts all three
+lines.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
