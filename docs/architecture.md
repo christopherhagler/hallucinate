@@ -7,7 +7,7 @@ exists today and the structure the rest of the roadmap builds on. Companion docu
 - [boot-protocol.md](boot-protocol.md) — bootloader ↔ kernel contract (versioned)
 - [memory-map.md](memory-map.md) — physical and virtual address space layout
 - [scheduling.md](scheduling.md) — threads, context switch, preemption
-- [userspace.md](userspace.md) — ring 3, syscall ABI, user address spaces
+- [userspace.md](userspace.md) — ring 3, syscall ABI, ELF loading, the process model
 - [testing.md](testing.md) — the three-level test strategy behind `make check`
 
 ## Design principles
@@ -37,8 +37,10 @@ kernel/
                           vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
   sched/                  sched_core.c (policy, host-tested) + sched.c
                           (threads, sleep/wake, join, preemption)
-  proc/                   process.c (user processes), elf_load.c (segment
-                          loader), syscall.c (dispatch, pointer validation)
+  proc/                   proc_core.c (process table, host-tested) +
+                          process.c (fork/execve/wait4/exit), elf_load.c
+                          (segment loader), syscall.c (dispatch),
+                          uaccess.c (user pointer validation and copies)
   lib/                    freestanding C library: string.c, fmt.c (vsnprintf),
                           elf64.c (pure ELF64 validator, host-tested)
   include/                public kernel headers (bootinfo.h, memlayout.h, ...)
@@ -86,8 +88,10 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 10. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
     protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
 11. `process_run_init()` — the embedded init ELF is validated and loaded into a
-    fresh user address space, runs in ring 3, syscalls back, and exits; its
-    address space is torn down leak-free.
+    fresh user address space and runs in ring 3 as pid 1. Init exercises the
+    whole process model — it forks, the child execve()s a second embedded
+    program, and init reaps it with wait4 — then exits; the kernel verifies
+    the process table is empty and not one physical frame leaked.
 12. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)

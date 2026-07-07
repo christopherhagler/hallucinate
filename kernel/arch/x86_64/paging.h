@@ -59,3 +59,12 @@ void paging_activate(const struct addrspace *as);
  * space is not the active CR3.
  */
 void paging_user_destroy(struct addrspace *as);
+
+/*
+ * Copy every user (lower-half) 4 KiB mapping of `src` into `dst`:
+ * fresh frames, page contents duplicated, leaf permissions preserved
+ * (fork's eager copy; COW comes later). `dst` must have no user
+ * mappings yet. Returns PAGING_OK or PAGING_ENOMEM — on failure the
+ * partial copy stays in `dst` for paging_user_destroy() to reclaim.
+ */
+int paging_user_clone(struct addrspace *dst, const struct addrspace *src);

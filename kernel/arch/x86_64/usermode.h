@@ -7,6 +7,11 @@
 
 #include <compiler.h>
 
-/* Drop into ring 3 at rip with the given user stack. Used once per
- * process launch; never returns. */
-NORETURN void user_enter(uint64_t rip, uint64_t rsp);
+/*
+ * Drop into ring 3 with the complete register state in *f. Both a
+ * process's first entry (zeroed frame, rip/rsp/rflags set by the
+ * image builder) and fork's child resuming at the parent's syscall
+ * return point. Never returns.
+ */
+struct syscall_frame;
+NORETURN void user_frame_enter(const struct syscall_frame *f);

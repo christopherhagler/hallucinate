@@ -24,8 +24,9 @@ stress run checked against a shadow model.
   context is adopted as thread 0, "main", on the boot stack; guard pages come
   with per-process address spaces in Phase 4).
 - States: `READY` (on the ready queue), `RUNNING` (at most one), `SLEEPING`
-  (on the wake-tick-sorted sleep list), `BLOCKED` (waiting in `thread_join`),
-  `ZOMBIE` (exited, awaiting join).
+  (on the wake-tick-sorted sleep list), `BLOCKED` (waiting in `thread_join`
+  or parked via `sched_block()`/`sched_wake()` — the primitive `wait4` blocks
+  on), `ZOMBIE` (exited, awaiting join).
 - Threads are joinable, pthread-style: each created thread must be passed to
   `thread_join()` exactly once; join blocks until the thread exits, then frees
   its stack and control block. The selftests assert the heap returns to its

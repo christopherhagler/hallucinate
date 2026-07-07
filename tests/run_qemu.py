@@ -26,6 +26,7 @@ PASS_MARKERS = [
     "selftest: sched interleave",
     "selftest: passed",
     "hello from ring 3",
+    "hello from execve",
     "user: C init: .data .bss .rodata ok",
     "user: init exited (status 0)",
     "boot: complete",

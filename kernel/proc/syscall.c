@@ -1,43 +1,31 @@
 /*
- * syscall.c - system call dispatch and implementations.
+ * syscall.c - system call dispatch and the small implementations.
  *
- * ABI in syscall.h. Every user pointer is validated against the
- * calling thread's address space (present + user-accessible on every
- * page) before the kernel touches it; the user address space is
- * active during a syscall, so validated pointers are then plain
- * dereferences.
+ * ABI in syscall.h. User pointers go through uaccess.h validation;
+ * the process-model syscalls (fork/execve/wait4/exit) live in
+ * process.c and get the syscall frame where they need the full user
+ * context.
  */
 #include <syscall.h>
 
 #include <stddef.h>
 
-#include <arch/x86_64/paging.h>
 #include <console.h>
 #include <errno.h>
-#include <memlayout.h>
-#include <pmm.h>
 #include <process.h>
-#include <sched.h>
+#include <uaccess.h>
 
 #define ERR(e) ((uint64_t)-(e))
 
-static int user_range_ok(uint64_t start, uint64_t len) {
-    if (start >= USER_VA_LIMIT || len > USER_VA_LIMIT - start) {
-        return 0;
-    }
-    struct addrspace *as = thread_current()->as;
-    if (as == NULL) {
-        return 0;
-    }
-    uint64_t first = start & ~(uint64_t)(PAGE_SIZE - 1);
-    for (uint64_t va = first; va < start + len; va += PAGE_SIZE) {
-        uint64_t pte = paging_lookup(as, va, NULL);
-        if ((pte & PTE_P) == 0 || (pte & PTE_US) == 0) {
-            return 0;
-        }
-    }
-    return 1;
-}
+/* The asm entry stub and struct syscall_frame must agree exactly. */
+_Static_assert(sizeof(struct syscall_frame) == 16ull * 8, "frame is 16 pushes");
+_Static_assert(offsetof(struct syscall_frame, r15) == 0ull * 8, "r15 pushed last");
+_Static_assert(offsetof(struct syscall_frame, rbx) == 5ull * 8, "layout");
+_Static_assert(offsetof(struct syscall_frame, rdi) == 11ull * 8, "layout");
+_Static_assert(offsetof(struct syscall_frame, rax) == 12ull * 8, "layout");
+_Static_assert(offsetof(struct syscall_frame, rflags) == 13ull * 8, "layout");
+_Static_assert(offsetof(struct syscall_frame, rip) == 14ull * 8, "layout");
+_Static_assert(offsetof(struct syscall_frame, rsp) == 15ull * 8, "rsp pushed first");
 
 /* write(fd, buf, count): fd 1 (stdout) and 2 (stderr) both reach the
  * kernel console until file descriptors exist (Phase 5). */
@@ -48,27 +36,35 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count) {
     if (count == 0) {
         return 0;
     }
-    if (!user_range_ok(buf, count)) {
+    if (!user_range_ok(buf, count, 0)) {
         return ERR(EFAULT);
     }
     console_write((const char *)buf, count);
     return count;
 }
 
-static uint64_t sys_getpid(void) {
-    return INIT_PID;
-}
-
-uint64_t syscall_dispatch(uint64_t nr, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    (void)a4;
-    switch (nr) {
+void syscall_dispatch(struct syscall_frame *frame) {
+    switch (frame->rax) {
     case SYS_write:
-        return sys_write(a1, a2, a3);
+        frame->rax = sys_write(frame->rdi, frame->rsi, frame->rdx);
+        return;
     case SYS_getpid:
-        return sys_getpid();
+        frame->rax = (uint64_t)process_getpid();
+        return;
+    case SYS_fork:
+        frame->rax = (uint64_t)process_fork(frame);
+        return;
+    case SYS_execve:
+        frame->rax = (uint64_t)process_execve(frame, frame->rdi, frame->rsi, frame->rdx);
+        return;
+    case SYS_wait4:
+        frame->rax =
+            (uint64_t)process_wait4((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10);
+        return;
     case SYS_exit:
-        process_exit((int)a1);
+        process_exit((int)frame->rdi);
     default:
-        return ERR(ENOSYS);
+        frame->rax = ERR(ENOSYS);
+        return;
     }
 }

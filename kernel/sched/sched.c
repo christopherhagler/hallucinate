@@ -197,6 +197,20 @@ void sched_sleep_ms(uint64_t ms) {
     sched_sleep_ticks(ticks > 0 ? ticks : 1);
 }
 
+void sched_block(void) {
+    KASSERT(!cpu_interrupts_enabled());
+    KASSERT(current != idle_thread);
+    current->state = THREAD_BLOCKED;
+    schedule();
+}
+
+void sched_wake(struct thread *t) {
+    uint64_t flags = cpu_irq_save();
+    KASSERT(t->state == THREAD_BLOCKED);
+    sched_core_enqueue(&core, t);
+    cpu_irq_restore(flags);
+}
+
 NORETURN void thread_exit(void) {
     cpu_disable_interrupts();
     struct thread *self = current;

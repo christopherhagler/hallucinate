@@ -112,6 +112,50 @@ void paging_activate(const struct addrspace *as) {
     write_cr3(as->pml4_phys);
 }
 
+int paging_user_clone(struct addrspace *dst, const struct addrspace *src) {
+    const uint64_t *pml4 = table_virt(src->pml4_phys);
+    for (int i4 = 0; i4 < ENTRIES / 2; i4++) { /* lower half only */
+        if (!(pml4[i4] & PTE_P)) {
+            continue;
+        }
+        const uint64_t *pdpt = table_virt(pml4[i4] & PTE_ADDR_MASK);
+        for (int i3 = 0; i3 < ENTRIES; i3++) {
+            if (!(pdpt[i3] & PTE_P)) {
+                continue;
+            }
+            const uint64_t *pd = table_virt(pdpt[i3] & PTE_ADDR_MASK);
+            for (int i2 = 0; i2 < ENTRIES; i2++) {
+                if (!(pd[i2] & PTE_P)) {
+                    continue;
+                }
+                if (pd[i2] & PTE_PS) {
+                    return PAGING_EALIGN; /* user mappings are 4 KiB only */
+                }
+                const uint64_t *pt = table_virt(pd[i2] & PTE_ADDR_MASK);
+                for (int i1 = 0; i1 < ENTRIES; i1++) {
+                    if (!(pt[i1] & PTE_P)) {
+                        continue;
+                    }
+                    uint64_t frame = pmm_alloc_frame();
+                    if (frame == 0) {
+                        return PAGING_ENOMEM;
+                    }
+                    memcpy(table_virt(frame), table_virt(pt[i1] & PTE_ADDR_MASK), SIZE_4K);
+                    uint64_t virt = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
+                                    ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
+                    uint64_t flags = pt[i1] & (PTE_W | PTE_US | PTE_NX);
+                    int rc = paging_map_4k(dst, virt, frame, flags);
+                    if (rc != PAGING_OK) {
+                        pmm_free_frame(frame);
+                        return rc;
+                    }
+                }
+            }
+        }
+    }
+    return PAGING_OK;
+}
+
 void paging_user_destroy(struct addrspace *as) {
     uint64_t *pml4 = table_virt(as->pml4_phys);
     for (int i4 = 0; i4 < ENTRIES / 2; i4++) { /* lower half only */

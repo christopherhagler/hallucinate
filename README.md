@@ -28,7 +28,7 @@ Two questions drive the project:
 
 ## Current status
 
-**Phase 3 complete; Phase 4 underway: the first userspace program runs in ring 3.**
+**Phase 4 nearly complete: a real process model — fork, execve, wait — runs in ring 3.**
 
 The system boots from a raw disk image in QEMU: our two-stage BIOS bootloader (A20, E820,
 unreal-mode ELF load, long-mode transition) hands off to a higher-half kernel at
@@ -38,21 +38,22 @@ keyboard interrupts through a remapped PIC, and manages memory end to end: an
 E820-seeded physical frame allocator, kernel-built page tables with a full physical
 direct map and a W^X kernel image (NX enforced everywhere data lives), and a slab
 `kmalloc`. On top of that runs a preemptive round-robin scheduler (kernel threads, 10 ms
-timeslices, timed sleep, pthread-style join) — and on top of *that*, userspace: a
-statically linked **ELF64 executable, written in C**, is validated by a host-tested
-loader, mapped into its own address space with per-segment W^X permissions, and dropped
-into ring 3, talking back through `syscall` using the Linux x86_64 ABI convention. The
-two `user:`-prefixed lines below are printed by that C program; its exit status 0
-asserts ten checks — zero-filled `.bss`, initialized writable `.data`, `getpid()`,
-registers preserved across syscalls, and the `-ENOSYS`/`-EBADF`/`-EFAULT` error paths
-among them.
+timeslices, timed sleep, block/wake, pthread-style join) — and on top of *that*, a
+Unix-shaped userspace: statically linked **ELF64 executables, written in C**, validated
+by a host-tested loader, mapped into per-process address spaces with per-segment W^X
+permissions, talking back through `syscall` using the Linux x86_64 ABI convention. Init
+**forks a child, the child execve()s a second program (argv delivered on a proper SysV
+stack), and init reaps it with wait4** — the boot below shows both programs printing
+from ring 3. Init's exit status 0 asserts sixteen checks: segment integrity, register
+preservation across syscalls, every error path (`-ENOSYS`/`-EBADF`/`-EFAULT`/`-ECHILD`/
+`-ENOENT`), and the fork/exec/wait round trip itself.
 
 ```
-Hallucinate OS v0.3.0 (x86_64)
+Hallucinate OS v0.4.0 (x86_64)
 cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked
 e820: 7 entries
 memory: 255 MiB usable
-pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x117000
+pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x11d000
 vmm: kernel page tables active, 4096 MiB direct-mapped at 0xffff800000000000
 heap: slab allocator ready
 sched: online, round-robin, 10 ms timeslice
@@ -60,8 +61,9 @@ syscall: SYSCALL/SYSRET ready (Linux x86_64 ABI numbering)
 timer: 100 Hz, ticking (slept 3 ticks)
 selftest: sched interleave "abcabcabcabc"
 selftest: passed (701 assertions)
-user: launching init (embedded ELF, 13232 bytes)
+user: launching init (embedded ELF, 13344 bytes)
 hello from ring 3
+hello from execve
 user: C init: .data .bss .rodata ok
 user: init exited (status 0)
 boot: complete

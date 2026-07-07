@@ -52,6 +52,17 @@ void sched_yield(void);
 void sched_sleep_ticks(uint64_t ticks);
 void sched_sleep_ms(uint64_t ms);
 
+/*
+ * Block the calling thread until sched_wake(). Interrupts must be
+ * disabled (cpu_irq_save) and the caller must already have published
+ * itself somewhere its waker can find it — both together close the
+ * lost-wakeup race. Returns, still interrupts-off, once woken.
+ */
+void sched_block(void);
+
+/* Make a thread blocked via sched_block() runnable again. */
+void sched_wake(struct thread *t);
+
 /* Terminate the calling thread; wakes its joiner if one is waiting.
  * Returning from a thread's entry function calls this implicitly. */
 NORETURN void thread_exit(void);

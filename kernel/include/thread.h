@@ -54,4 +54,8 @@ struct thread {
     /* Address space active while this thread runs; NULL means the
      * kernel address space (all pure kernel threads). */
     struct addrspace *as;
+
+    /* Owning user process (proc_core pid), 0 for pure kernel threads.
+     * Set before the thread first runs; syscalls key off it. */
+    int pid;
 };

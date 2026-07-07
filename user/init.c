@@ -5,30 +5,25 @@
  * kernel does not save FPU/SSE state across context switches, and
  * syscalls/interrupts may run on this stack.
  *
- * Doubles as the acceptance test for the ELF64 loader and the syscall
- * ABI: it deliberately places state in .text, .rodata, .data, and
- * .bss (four PT_LOAD-covered sections with distinct permissions) and
- * verifies all of it, plus every syscall result the kernel can
- * produce today. The exit status is the report: 0 means every check
- * passed, any other value names the first failed check. The kernel
- * prints the status and the boot integration test asserts on it.
+ * Doubles as the acceptance test for the ELF64 loader, the syscall
+ * ABI, and the process model: it deliberately places state in .text,
+ * .rodata, .data, and .bss (PT_LOAD-covered sections with distinct
+ * permissions) and verifies all of it, verifies every syscall result
+ * the kernel can produce today, then forks a child that execs
+ * /bin/hello and reaps it. The exit status is the report: 0 means
+ * every check passed, any other value names the first failed check.
+ * The kernel prints the status and the boot integration test asserts
+ * on it.
  */
 #include <stdint.h>
 
 #include "syscall.h"
+#include "ulib.h"
 
 static const char banner[] = "hello from ring 3\n";             /* .rodata */
 static char report[] = "user: ? init: .data .bss .rodata ok\n"; /* .data  */
 static volatile int data_word = 0x600D;                         /* .data  */
 static volatile uint64_t bss_block[16];                         /* .bss   */
-
-static unsigned long str_len(const char *s) {
-    unsigned long n = 0;
-    while (s[n] != '\0') {
-        n++;
-    }
-    return n;
-}
 
 /*
  * The ABI promises that a syscall changes only rax (and rcx/r11 by
@@ -95,6 +90,38 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     if (!regs_survive_syscall()) {
         return 10;
     }
+
+    /* The process model: fork a child, replace its image with
+     * /bin/hello via execve, and reap it. hello exits 42 only if its
+     * argv arrived exactly as passed here. */
+    long pid = sys_fork();
+    if (pid < 0) {
+        return 11;
+    }
+    if (pid == 0) {
+        static const char *const args[] = {"/bin/hello", "via-fork-exec", 0};
+        sys_execve("/bin/hello", args, 0);
+        sys_exit(100); /* only reached if execve failed */
+    }
+    if (pid == sys_getpid()) {
+        return 12; /* child pid must be a different process */
+    }
+    int wstatus = -1;
+    if (sys_wait4(-1, &wstatus, 0) != pid) {
+        return 13;
+    }
+    if (wstatus != (42 << 8)) {
+        return 14; /* hello's checks failed or encoding is wrong */
+    }
+    /* No children left: waiting again reports -ECHILD. */
+    if (sys_wait4(-1, 0, 0) != -ECHILD) {
+        return 15;
+    }
+    /* execve of a nonexistent program fails cleanly. */
+    if (sys_execve("/bin/nonesuch", 0, 0) != -2 /* -ENOENT */) {
+        return 16;
+    }
+
     /* Patch the report in .data before printing it: proves the
      * write() source really is our mutable data segment. */
     report[6] = 'C';

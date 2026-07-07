@@ -1,9 +1,8 @@
 # Userspace and System Calls
 
-Phase 4 brings ring 3. This document covers what is implemented so far — user
-address spaces, the SYSCALL/SYSRET path, the ELF64 loader, and a C init
-program — and records the ABI contract the rest of the phase (process table,
-fork/exec/wait) builds on.
+Phase 4 brings ring 3. This document covers user address spaces, the
+SYSCALL/SYSRET path, the ELF64 loader, and the process model: fork, execve,
+wait4, exit over a host-tested process table.
 
 ## System call ABI
 
@@ -26,8 +25,11 @@ Implemented today (numbers from the Linux x86_64 table):
 | # | syscall | scope |
 |---|---|---|
 | 1 | `write(fd, buf, count)` | fd 1/2 → kernel console; full validation, returns count |
-| 39 | `getpid()` | init's PID (1) |
-| 60 | `exit(status)` | terminates the process; kernel logs the status |
+| 39 | `getpid()` | the calling process's pid |
+| 57 | `fork()` | full process clone (eager copy; COW later); child gets rax = 0 |
+| 59 | `execve(path, argv, envp)` | replace the image from the built-in program table; SysV argv/envp stack |
+| 60 | `exit(status)` | zombie in the table, parent woken |
+| 61 | `wait4(pid, wstatus, 0, NULL)` | blocking reap of one child (pid > 0 exact, -1 any); Linux `WIFEXITED` status encoding |
 
 Every user pointer is validated before use: the range must lie below
 `USER_VA_LIMIT` (`0x0000800000000000`, the canonical lower half) and every
@@ -53,9 +55,12 @@ MSR setup (`usermode.c`): `EFER.SCE`, `STAR` (selector layout in `gdt.h` was
 designed for SYSRET's `+8/+16` selector math back in Phase 2), `LSTAR` →
 entry stub, `SFMASK`.
 
-The *first* entry to ring 3 goes through `user_enter()` — an `iretq` with a
-hand-built frame (user CS/SS at RPL 3, `IF` set) and every register cleared so
-nothing of the kernel leaks into ring 3.
+The entry stub's register save area *is* `struct syscall_frame` (layout
+asserted with `offsetof`): the complete user context, which is what makes
+fork a struct copy. All kernel→ring 3 entries go through
+`user_frame_enter(frame)` — an `iretq` with the frame's full register state.
+A process's first entry is simply a zeroed frame with `rip`/`rsp`/`rflags`
+set, so nothing of the kernel leaks into ring 3.
 
 ## Address spaces
 
@@ -102,54 +107,101 @@ Loading is split the same way as every other core/kernel pair in the tree:
 policy is exercised by the very first binary. The ELF headers themselves are
 not mapped into user memory; the kernel reads them from the embedded image.
 
-## Init
+## The process model
 
-Init is a freestanding C program: `user/crt0.asm` (zero the frame pointer,
-align the stack, `call main`, `exit(main())`) plus `user/init.c`, with
-syscall wrappers in `user/syscall.h`. It is compiled without SSE and without
-the red zone — the kernel does not yet save FPU/SSE state across context
-switches, and interrupts run on the current stack. The linked `init.elf` is
-embedded in kernel `.rodata` (`kernel/user_blob.asm`) and loaded at boot:
+The process table itself is a pure state machine (`kernel/proc/proc_core.c`,
+host-tested): up to 64 processes, monotonically increasing pids starting at
+1 (init), parent links, `LIVE → ZOMBIE → free` lifecycle, and orphan
+reparenting to init on parent exit. The kernel wraps it
+(`kernel/proc/process.c`) with what a pure table cannot hold: the address
+space, the hosting kernel thread, the blocked waiter, and the process name.
+
+Every process is **hosted by a kernel thread**. The thread builds nothing
+itself — it receives a completed image (address space + start frame),
+binds to the address space (`sched_set_addrspace`), and enters ring 3 via
+`user_frame_enter`, never to return except through syscalls. This gives
+processes preemption, sleep/wake, and join for free from the Phase 3
+scheduler; the thread carries its process's pid.
+
+The lifecycle syscalls:
+
+- **`fork`** allocates a child pid, clones the address space eagerly
+  (`paging_user_clone`: every lower-half 4 KiB mapping copied to a fresh
+  frame, W/US/NX permissions preserved — COW comes later), copies the
+  parent's saved syscall frame with `rax = 0`, and launches a hosting
+  thread. The full-trapframe entry path is what makes this a struct copy.
+- **`execve`** copies the path and both string vectors out of user memory
+  first (bounded: 16 args, 128 bytes of strings, path ≤ 63), then builds the
+  **complete new image before touching the old one** — address space, ELF
+  segments, stack, argv/envp — so any failure (`-ENOENT`, `-ENOMEM`,
+  `-E2BIG`) returns with the caller unharmed. On success it swaps the
+  address space, reloads CR3, destroys the old space, and rewrites the saved
+  syscall frame so `sysret` lands at the new entry point. Programs come from
+  a built-in table (`/bin/init`, `/bin/hello`) until the VFS exists.
+- **`exit`** marks the process a zombie holding its status, reparents its
+  children to init, wakes the parent if it is blocked in `wait4`, and ends
+  the hosting thread.
+- **`wait4`** finds a matching child (exact pid or `-1` for any): a zombie
+  is reaped — join the hosting thread, destroy the address space, free the
+  table slot, deliver `(status & 0xff) << 8` (Linux `WIFEXITED` encoding);
+  otherwise the parent publishes itself as the waiter and blocks. The check
+  and the block happen in one interrupts-off section, so a child exiting
+  concurrently cannot slip through unnoticed.
+
+New images start with the System V ABI stack contract: `[argc, argv...,
+NULL, envp..., NULL, AT_NULL]` at a 16-byte-aligned `rsp`, string bytes
+packed in the top stack page. `user/crt0.asm` picks `argc`/`argv` from it
+and calls `main(argc, argv)`.
 
 ```
 0x0000000000400000   .text    R+X
 0x0000000000401000   .rodata  R
 0x0000000000402000   .data + .bss  RW + NX
 0x00007FFFFFFFB000   stack, 4 pages RW + NX
-0x00007FFFFFFFF000   initial RSP
+0x00007FFFFFFFF000   stack top; initial RSP just below, after argv/envp
 ```
 
-A kernel thread hosts the process: it builds the address space, loads the
-ELF, binds to it (`sched_set_addrspace`), and drops to ring 3, never to
-return except through syscalls. `SYS_exit` records the status and ends the
-hosting thread; the boot thread joins it, tears the address space down with
-`paging_user_destroy()` (every user frame and page table freed — the launch
-path panics if a single frame leaks), and logs:
+## Init
+
+Init is a freestanding C program: `user/crt0.asm` plus `user/init.c`, with
+syscall wrappers in `user/syscall.h` and a tiny `user/ulib.h`. User code is
+compiled without SSE and without the red zone — the kernel does not save
+FPU/SSE state across context switches, and interrupts run on the current
+stack. The linked ELFs (`init.elf`, `hello.elf`) are embedded in kernel
+`.rodata` (`kernel/user_blob.asm`); boot loads init and joins it:
 
 ```
-user: launching init (embedded ELF, 13232 bytes)
+user: launching init (embedded ELF, 13344 bytes)
 hello from ring 3
+hello from execve
 user: C init: .data .bss .rodata ok
 user: init exited (status 0)
 ```
 
-Init doubles as the acceptance test for the loader and the ABI. Its exit
-status names the first failed check; 0 means all of: `write` returned the
-full length, `.bss` arrived zero-filled, `.data` arrived initialized and
-writable (the second output line is patched in `.data` before printing),
-`getpid` returned 1, syscall 999 returned `-ENOSYS`, fd 7 returned `-EBADF`,
-an unmapped pointer returned `-EFAULT`, and all six argument registers
-survived a syscall unchanged. The QEMU integration test asserts all three
-lines.
+Init doubles as the acceptance test for the loader, the ABI, and the
+process model. Its exit status names the first failed check; 0 means all
+sixteen passed: `write` returns the full length, `.bss` zero-filled, `.data`
+initialized and writable, `getpid`, `-ENOSYS`/`-EBADF`/`-EFAULT` error
+paths, all six argument registers surviving a syscall, and the full process
+round trip — `fork` returns a fresh pid, the child `execve`s `/bin/hello`
+(which verifies its own argv arrived intact and exits 42), `wait4` returns
+that pid with status `42 << 8`, a second `wait4` returns `-ECHILD`, and
+`execve` of an unknown path returns `-ENOENT`. After init is reaped, the
+kernel asserts the process table is empty and that the physical frame count
+matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
-- One process; PIDs are fixed; no fork/exec/wait yet.
 - Static `ET_EXEC` only; `ET_DYN`/interpreters are Phase 7 territory.
+- `execve` loads from a built-in program table; real paths arrive with the
+  VFS (Phase 5).
 - A user-mode fault (e.g. touching a kernel address) currently panics the
-  kernel via the trap path instead of killing the process.
+  kernel via the trap path instead of killing the process — the next
+  hardening step.
+- `fork` copies eagerly; no copy-on-write yet.
+- `wait4` supports options 0 and a NULL rusage only; no `WNOHANG`, no
+  process groups, no signals.
 - No SMEP/SMAP yet; the kernel relies on paging permissions plus pointer
   validation.
 - The kernel does not save FPU/SSE state, so user code is built `-mno-sse`
-  (enforced by `USER_CFLAGS`); lazy FPU switching comes with the process
-  table work.
+  (enforced by `USER_CFLAGS`); lazy FPU switching comes later.
