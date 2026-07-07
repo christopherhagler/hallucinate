@@ -37,9 +37,10 @@ kernel/
                           vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
   sched/                  sched_core.c (policy, host-tested) + sched.c
                           (threads, sleep/wake, join, preemption)
-  proc/                   process.c (user processes) + syscall.c (dispatch,
-                          user pointer validation)
-  lib/                    freestanding C library: string.c, fmt.c (vsnprintf)
+  proc/                   process.c (user processes), elf_load.c (segment
+                          loader), syscall.c (dispatch, pointer validation)
+  lib/                    freestanding C library: string.c, fmt.c (vsnprintf),
+                          elf64.c (pure ELF64 validator, host-tested)
   include/                public kernel headers (bootinfo.h, memlayout.h, ...)
   console.c               console multiplexer (serial + VGA)
   kprintf.c               formatted kernel logging
@@ -47,6 +48,8 @@ kernel/
   selftest.c              boot-time assertion suite
   main.c                  kmain: bring-up sequence
   linker.ld               higher-half link script (W^X section symbols)
+user/                     userspace: init.c, crt0.asm, syscall.h wrappers,
+                          user.ld (static ELF64 at 0x400000, W^X segments)
 tools/mkimage.py          disk image assembler + boot-protocol validator
 tests/host/               unit tests, compiled for macOS under ASan/UBSan
 tests/run_qemu.py         headless QEMU integration harness
@@ -82,8 +85,9 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
    ticks by sleeping on it.
 10. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
     protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
-11. `process_run_init()` — the embedded userspace init runs in ring 3, syscalls
-    back, and exits; its address space is torn down leak-free.
+11. `process_run_init()` — the embedded init ELF is validated and loaded into a
+    fresh user address space, runs in ring 3, syscalls back, and exits; its
+    address space is torn down leak-free.
 12. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)

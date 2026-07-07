@@ -50,12 +50,11 @@ qemu-system-x86_64 -m 256M -drive file=disk.img,format=raw \
     -serial stdio -display none -monitor none -no-reboot
 ```
 
-It asserts that these markers appear on the serial console **in order**:
-
-1. `Hallucinate OS` (banner)
-2. `e820:` (memory map parsed from bootinfo)
-3. `selftest: passed` (level 2 green)
-4. `boot: complete`
+It asserts that the expected markers appear on the serial console **in order** —
+the authoritative list is `PASS_MARKERS` in `tests/run_qemu.py`, one marker per
+proven subsystem, from the banner through memory, scheduling, the in-kernel
+self-tests, and the ring 3 round trip (`hello from ring 3` is printed by user
+code) to `boot: complete`.
 
 and fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on a 30 s
 timeout. On failure the full serial transcript is printed. The bootloader and kernel are

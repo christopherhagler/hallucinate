@@ -1,10 +1,10 @@
 /*
  * process.h - user processes.
  *
- * Phase 4, first slice: a single process ("init") whose program is a
- * flat binary embedded in the kernel image, hosted by one kernel
- * thread. The ELF loader, PIDs beyond init, and fork/exec/wait build
- * on this in the following slices.
+ * Phase 4, current slice: a single process ("init") loaded from an
+ * ELF64 image embedded in the kernel, hosted by one kernel thread.
+ * PIDs beyond init and fork/exec/wait build on this in the next
+ * slice.
  */
 #pragma once
 
