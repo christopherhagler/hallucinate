@@ -59,6 +59,7 @@ Two structural decisions shape almost every chapter, so learn them now:
 
 | # | Chapter | What you'll build understanding of |
 |---|---------|-------------------------------------|
+| 0 | [Prerequisites, Tools, and the Debug Loop](00-prerequisites-and-debugging.md) | What to know first; the toolchain and references; how to actually debug bare metal |
 | 1 | [The Mindset and the Method](01-mindset-and-method.md) | How to think about code with no safety net; the disciplines that recur everywhere |
 | 2 | [The Toolchain and the Build](02-toolchain-and-build.md) | Cross-compiling a freestanding kernel; linker scripts; the disk image |
 | 3 | [The Bootloader](03-bootloader.md) | Real mode, BIOS, A20, E820, the long-mode transition, loading an ELF |
