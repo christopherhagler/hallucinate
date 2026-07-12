@@ -111,13 +111,30 @@ $(BUILD)/disk.img: $(BUILD)/boot/stage1.bin $(BUILD)/boot/stage2.bin \
 	    --kernel $(BUILD)/kernel.elf \
 	    --out $@
 
-# The filesystem disk, attached as a modern virtio-blk device (the
-# boot disk stays on the BIOS/INT13 path). Scratch zeros until
-# mkgraphfs.py lands in slice 5b.
-FS_IMG_MIB := 16
-$(BUILD)/fs.img:
+# graphfs tools: thin host drivers over the kernel-tested core, so mkfs and
+# fsck exercise the exact same on-disk-format code the kernel mounts. Built
+# with the same symbol renames as the host tests; libc supplies file I/O.
+GFS_CORE_SRCS   := kernel/fs/graphfs_core.c kernel/lib/crc32c.c \
+    kernel/lib/string.c kernel/lib/fmt.c
+GFS_TOOL_SRCS   := tools/graphfs_mkfs.c tools/graphfs_fsck.c
+GFS_TOOL_CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -g -fno-builtin \
+    -Ikernel/include $(HOST_RENAMES)
+
+$(BUILD)/graphfs_mkfs: tools/graphfs_mkfs.c $(GFS_CORE_SRCS)
 	@mkdir -p $(BUILD)
-	$(PY) -c "open('$@','wb').write(bytes($(FS_IMG_MIB)*1024*1024))"
+	$(CC) $(GFS_TOOL_CFLAGS) $^ -o $@
+
+$(BUILD)/graphfs_fsck: tools/graphfs_fsck.c $(GFS_CORE_SRCS)
+	@mkdir -p $(BUILD)
+	$(CC) $(GFS_TOOL_CFLAGS) $^ -o $@
+
+# The filesystem disk, attached as a modern virtio-blk device (the boot disk
+# stays on the BIOS/INT13 path). Built by graphfs_mkfs, which installs the
+# userspace programs at /bin so the kernel can load them from disk (5c).
+FS_IMG_MIB := 16
+$(BUILD)/fs.img: $(BUILD)/graphfs_mkfs $(USER_ELFS)
+	$(BUILD)/graphfs_mkfs --out $@ --size-mib $(FS_IMG_MIB) \
+	    /bin/init=$(BUILD)/user/init.elf /bin/hello=$(BUILD)/user/hello.elf
 
 QEMU_FLAGS := -m 256M -drive file=$(BUILD)/disk.img,format=raw \
     -drive file=$(BUILD)/fs.img,format=raw,if=none,id=fsdisk \
@@ -146,24 +163,26 @@ HOST_CFLAGS := -std=c11 -Wall -Wextra -Werror -g -O1 \
 HOST_TEST_SRCS := tests/host/test_main.c tests/host/test_string.c \
     tests/host/test_fmt.c tests/host/test_kbd.c tests/host/test_pmm.c \
     tests/host/test_heap.c tests/host/test_sched.c tests/host/test_elf64.c \
-    tests/host/test_proc.c tests/host/test_virtq.c \
+    tests/host/test_proc.c tests/host/test_virtq.c tests/host/test_graphfs.c \
     kernel/lib/string.c kernel/lib/fmt.c kernel/drivers/kbd_map.c \
     kernel/mm/pmm_core.c kernel/mm/heap_core.c kernel/sched/sched_core.c \
-    kernel/lib/elf64.c kernel/proc/proc_core.c kernel/drivers/virtq_core.c
+    kernel/lib/elf64.c kernel/proc/proc_core.c kernel/drivers/virtq_core.c \
+    kernel/lib/crc32c.c kernel/fs/graphfs_core.c
 
 $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
                      kernel/include/string.h kernel/include/fmt.h \
                      kernel/include/kbd_map.h kernel/include/pmm_core.h \
                      kernel/include/heap_core.h kernel/include/sched_core.h \
                      kernel/include/thread.h kernel/include/elf64.h \
-                     kernel/include/proc_core.h kernel/include/virtq_core.h
+                     kernel/include/proc_core.h kernel/include/virtq_core.h \
+                     kernel/include/crc32c.h kernel/include/graphfs_core.h
 	@mkdir -p $(BUILD)
 	$(CC) $(HOST_CFLAGS) $(HOST_TEST_SRCS) -o $@
 
 # ------------------------------------------------------------------ checks --
 
-.PHONY: check check-host check-boot
-check: check-host check-boot
+.PHONY: check check-host check-boot check-fsck
+check: check-host check-boot check-fsck
 	@echo "make check: all suites passed"
 
 check-host: $(BUILD)/host_tests
@@ -173,9 +192,14 @@ check-boot: $(BUILD)/disk.img $(BUILD)/fs.img tests/run_qemu.py
 	$(PY) tests/run_qemu.py --image $(BUILD)/disk.img --fsimg $(BUILD)/fs.img \
 	    --qemu $(QEMU)
 
+# Verify the freshly built filesystem image is structurally sound: the same
+# fsck the crash-consistency gate will run after boot (5d).
+check-fsck: $(BUILD)/fs.img $(BUILD)/graphfs_fsck
+	$(BUILD)/graphfs_fsck $(BUILD)/fs.img
+
 # ------------------------------------------------------------ code quality --
 
-ALL_C_FILES := $(shell find kernel tests user -name '*.c' -o -name '*.h' | sort)
+ALL_C_FILES := $(shell find kernel tests user tools -name '*.c' -o -name '*.h' | sort)
 
 .PHONY: format format-check tidy
 format:
@@ -187,6 +211,7 @@ format-check:
 tidy:
 	$(LLVM_BIN)/clang-tidy --quiet $(KERNEL_C_SRCS) -- $(KERNEL_CFLAGS)
 	$(LLVM_BIN)/clang-tidy --quiet $(USER_C_SRCS) -- $(USER_CFLAGS)
+	$(LLVM_BIN)/clang-tidy --quiet $(GFS_TOOL_SRCS) -- $(GFS_TOOL_CFLAGS)
 
 # ----------------------------------------------------------------- cleanup --
 

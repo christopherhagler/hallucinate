@@ -3,7 +3,7 @@
 Phase 5 gives the kernel a disk. This document covers the PCI bus scan, the
 VIRTIO 1.2 modern PCI transport, the virtio-blk driver, and the block layer
 that filesystems build on. The native filesystem itself (graphfs) has its
-own document: [graphfs.md](graphfs.md) (lands with slice 5b).
+own document: [graphfs.md](graphfs.md).
 
 ## Topology
 
