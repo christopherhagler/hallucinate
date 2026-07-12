@@ -110,6 +110,57 @@ at your code. It is to *open the SDM to the relevant chapter and read the
 paragraph that defines the behavior*. Guessing about hardware is how you lose a
 day; the answer is almost always one lookup away.
 
+### The tacit-knowledge canon (the *why behind the why*)
+
+The specs above tell you what the hardware *does*. They do not tell you *why a
+design is shaped the way it is* — why you block instead of spin, why a struct
+field is padded to a cache line, why a lock word bounces between cores under
+contention, why 16-byte stack alignment, why write-through over write-back. That
+layer — call it mechanical sympathy — is rarely written next to the code it
+explains; it lives in a small canon of texts and in the heads of people who have
+been burned. Worth knowing early: this codebase is **uniprocessor, `-mno-sse`,
+and emulated**, so it deliberately *cannot* provoke a large part of this layer
+(false sharing, memory-ordering barriers, NUMA, real cache-miss and
+branch-misprediction costs). Read these to build the instinct the code cannot
+give you directly (Appendix A collects the specific *whys* this codebase's own
+decisions embody):
+
+- **Ulrich Drepper, *What Every Programmer Should Know About Memory*** (free PDF /
+  LWN series). The single best source for the cache hierarchy, coherence (MESI),
+  **false sharing**, and NUMA — i.e. the "cache bouncing" instinct. If you read
+  one thing here, read this.
+- **Agner Fog's optimization manuals** (`agner.org/optimize`, free). Especially
+  *The microarchitecture of Intel, AMD and VIA CPUs* and *Calling conventions* —
+  the ground truth on pipelines, instruction cost, and the ABI/codegen reality
+  behind rules like 16-byte stack alignment.
+- **Intel SDM Vol. 3A, Ch. 8–11** (memory ordering and caching) and the **Intel
+  64 and IA-32 Optimization Reference Manual**. The authoritative version of what
+  Drepper and Fog explain — memory-ordering guarantees, `mfence`/`lfence`/`sfence`,
+  cache control. The chapters you reach for when correctness, not just layout,
+  depends on the memory model.
+- **Paul McKenney, *Is Parallel Programming Hard, And, If So, What Can You Do
+  About It?*** ("perfbook", free PDF). The reference for when you reach SMP:
+  memory barriers, lock contention and its cures (backoff, MCS/queued locks,
+  per-CPU data), and RCU. Directly relevant the day this kernel grows a second
+  CPU and the interrupts-off lock becomes a real spinlock.
+- **Hennessy & Patterson, *Computer Architecture: A Quantitative Approach*.** The
+  architecture bible — the memory hierarchy, pipelining, and speculation done
+  *quantitatively*, so "a cache miss is expensive" becomes an actual number you
+  can reason with.
+- **Brendan Gregg, *Systems Performance*.** Methodology — how to *measure* rather
+  than guess where the cost is, and the mental models (USE method, latency
+  hierarchies) that turn folklore into evidence.
+- **LWN.net, and real kernel commit messages / mailing-list threads.** Much of
+  this knowledge exists *only* in changelogs and design debates. When you wonder
+  "why did Linux do it this way," the answer is often one `git log` or LWN article
+  away — and reading those threads teaches you the reasoning style itself.
+
+Pair this reading with the habit from which it came: whenever you meet a design
+decision and think *"why this and not the obvious alternative?"*, chase the answer
+down to the hardware or ABI reason and the failure mode the naive choice would
+hit. That question, asked repeatedly against code you already understand, is how
+the tacit layer is actually built.
+
 ## 0.4 The inner loop in this repo
 
 Three commands are your entire workflow. Learn what each proves.

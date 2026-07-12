@@ -75,6 +75,7 @@ Two structural decisions shape almost every chapter, so learn them now:
 | 13 | [graphfs: A Filesystem From First Principles](13-graphfs.md) | Copy-on-write, self-checksumming, and designing an on-disk format |
 | 14 | [Testing and Professional Discipline](14-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
 | 15 | [Where to Go Next](15-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
+| A | [The Folklore Margin](appendix-a-folklore.md) | The tacit *whys* behind the code's decisions — naive alternative, real reason, failure avoided |
 
 ## A note on how to read it
 
