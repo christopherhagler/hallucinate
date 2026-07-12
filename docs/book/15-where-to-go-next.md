@@ -47,7 +47,10 @@ than the implementations, is the through-line.
 ## 15.2 How to actually get better at this
 
 Reading a system teaches you a lot; the next order of magnitude comes from
-*changing* one. Concrete ways to use this codebase to level up, roughly in order:
+*changing* one. [Appendix B](appendix-b-lab-book.md) turns everything below into
+a full graded curriculum — diagnosis drills, reproduce-from-tests labs,
+extension projects, and comparative reading — with a verification step for each.
+The short version, roughly in order:
 
 1. **Reproduce a subsystem from its tests.** Delete the body of `pmm_core.c` or
    `sched_core.c` (keep the header and the host tests) and reimplement it until the
