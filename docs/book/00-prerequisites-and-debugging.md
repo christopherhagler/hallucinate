@@ -1,6 +1,6 @@
 # Chapter 0 — Prerequisites, Tools, and the Debug Loop
 
-The other fifteen chapters teach you how this operating system works. This one is
+The other sixteen chapters teach you how this operating system works. This one is
 different: it is about the *equipment* — what you need to know before you start,
 the tools you will live inside, the reference documents you will consult a hundred
 times a day, and above all the **debug loop**, because writing an OS is mostly
@@ -188,6 +188,9 @@ Mac, with a sanitizer and a stack trace, instead of on bare metal with neither.
 
 Here is the part no amount of reading replaces. When the kernel misbehaves, you
 have four instruments, in rough order of how often you reach for them.
+(Appendix C shows all four in action — three real bugs from this codebase's
+history hunted end to end — and closes with a symptom-to-instrument triage
+table worth keeping open while you work.)
 
 ### Instrument 1: serial `printf`, and loud failure
 
@@ -286,7 +289,7 @@ Put the instruments together into a way of working:
 1. **Read a chapter, then read its code** with the repo open, setting a gdb
    breakpoint in the function it describes and watching it run. Concept, then
    code, then *observed behavior* — all three, or it will not stick.
-2. **Reproduce a subsystem from its tests** (Chapter 15 §2): blank the body of
+2. **Reproduce a subsystem from its tests** (Chapter 16 §2): blank the body of
    `pmm_core.c` or `sched_core.c`, keep the header and host tests, and reimplement
    until `make check-host` is green. The tests are a specification; passing them
    from scratch is how you learn which invariants are load-bearing.

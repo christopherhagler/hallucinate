@@ -197,6 +197,14 @@ check-boot: $(BUILD)/disk.img $(BUILD)/fs.img tests/run_qemu.py
 check-fsck: $(BUILD)/fs.img $(BUILD)/graphfs_fsck
 	$(BUILD)/graphfs_fsck $(BUILD)/fs.img
 
+# -------------------------------------------------------------------- docs --
+
+# building-an-os.md is generated from the chapter files; edit those, then
+# regenerate. See tools/mkbook.py.
+.PHONY: book
+book:
+	$(PY) tools/mkbook.py
+
 # ------------------------------------------------------------ code quality --
 
 ALL_C_FILES := $(shell find kernel tests user tools -name '*.c' -o -name '*.h' | sort)

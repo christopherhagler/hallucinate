@@ -83,7 +83,85 @@ carved from that virtual space, then thread stacks from the heap. You cannot
 reorder any of it. When you design a bring-up sequence, write it as a dependency
 list first; the code order falls out of it.
 
-## 4.3 The GDT and TSS: segmentation's vestige, and the double-fault stack
+## 4.3 Building your voice: serial, VGA, kprintf, and panic
+
+Chapter 1 warned you: "There is no `printf` until you write one." This is
+where it gets written — and it deserves more than the one line most books
+give it, because the console stack is the instrument you will debug *every
+other subsystem* through. Code you use to find bugs must be held to a higher
+standard than the code you find them in: it has to work when the rest of the
+kernel is broken, and it must never make things worse. Every design choice
+below follows from that.
+
+As the commit ledger records (Chapter 15), `vsnprintf` was written and
+host-tested *before the bootloader existed* — the first freestanding code in
+the project ran under AddressSanitizer on a Mac before any code ran on the
+metal. `kernel/lib/fmt.c` is a complete C99 formatter (flags, width,
+precision, all the length modifiers) built as a pure core: it renders into a
+caller-supplied bounded buffer through a tiny `sink` that counts the full
+would-be length while never writing past capacity. No allocation, no
+recursion, no floating point — nothing that could fail in a way the caller
+has to handle, because this code runs inside `panic()`, where there is no
+one left to handle anything. Note its posture toward its own bugs: an
+unknown conversion is emitted verbatim, "so bugs are visible in output."
+Even the formatter fails loud.
+
+Above it sits a two-layer output path, and the layering is deliberate:
+
+- **`console.c`** fans each character out to both sinks — serial and VGA —
+  translating `\n` to `\r\n` for serial so the transcript reads correctly in
+  any terminal. Two sinks because they fail differently: VGA text mode is
+  always there on a BIOS boot but invisible to automation; serial is what
+  the test harness and your terminal actually read, but may legitimately be
+  absent.
+- **`kprintf.c`** formats into a 512-byte stack buffer, then emits the
+  whole line inside one interrupts-off section. The split matters: only the
+  *emission* needs atomicity (so two threads' lines cannot interleave
+  mid-line once the scheduler exists), so only the emission is inside the
+  critical section — formatting stays outside. Hold the lock for exactly
+  the operation that needs it. And when a message exceeds the buffer, it is
+  truncated *and marked* — `[kprintf: truncated]` — never silently clipped:
+  a diagnostic channel that silently drops bytes is a channel you can no
+  longer trust while debugging.
+
+The serial driver itself (`drivers/serial.c`, a 16550 UART) shows the
+instrument-grade standard in twenty lines. At init it runs a **loopback
+self-test** — puts the UART in loopback mode, sends `0xAE`, and requires
+that exact byte back before trusting the port; if the test fails, the driver
+marks itself absent and every later write becomes a no-op. And its transmit
+wait is **bounded**: if the transmitter never drains within a spin budget,
+the driver disables itself rather than spin forever —
+
+```c
+    /* Bounded wait so a wedged UART degrades output instead of hanging boot. */
+    for (uint32_t spin = 0; spin < 100000; spin++) {
+        if (inb(COM1 + REG_LSR) & LSR_THRE) {
+            outb(COM1 + REG_DATA, (uint8_t)c);
+            return;
+        }
+    }
+    serial_ok = false; /* transmitter never drained; stop trying */
+```
+
+Sit with why this matters: an instrument must never hang the patient. A
+`kprintf` that can wedge the boot converts every future debugging session
+into a game of "is it my bug or my print?" The rule generalizes to every
+diagnostic path you will ever write — bounded waits, self-checks before
+trust, graceful self-disabling — because the one thing an instrument cannot
+do is report its own failure.
+
+`panic()` completes the voice. It is deliberately tiny: print
+`PANIC: file:line:` (the macro captures the call site), format the message,
+print `system halted`, halt forever. File and line cost nothing and convert
+"the kernel died" into "the kernel died *here*, because *this*" — which,
+per Chapter 0, is the first thing you read in any hunt. The register dumps
+for hardware exceptions live one layer down, in the trap dispatcher (§4.5),
+where the trapframe actually is. Together they enforce the property the
+whole test architecture leans on (Chapter 14): every fatal path is loud,
+patterned, and machine-detectable — which is precisely what makes silence
+itself diagnostic.
+
+## 4.4 The GDT and TSS: segmentation's vestige, and the double-fault stack
 
 In long mode, segmentation is *mostly* dead — the flat 64-bit address space
 means code and data segments have base 0 and no limit. But the Global Descriptor
@@ -115,7 +193,7 @@ good IST stack means even a kernel-stack-overflow produces a diagnostic instead
 of a silent reboot. That is a deliberate investment in *debuggability of the
 worst case* — exactly where beginners under-invest.
 
-## 4.4 The IDT: 256 vectors and one dispatcher
+## 4.5 The IDT: 256 vectors and one dispatcher
 
 The Interrupt Descriptor Table maps each of the 256 interrupt/exception vectors
 to a handler. The CPU uses vectors 0–31 for architectural exceptions (0 = divide
@@ -150,10 +228,13 @@ decide whether a fault is fatal is the single choke point every fault flows
 through, and that place exists precisely because the IDT funnels all 256 vectors
 into one dispatcher.
 
-## 4.5 The transferable lessons
+## 4.6 The transferable lessons
 
 - **Bring up your output before anything that might fail.** You cannot debug
   what you cannot see, and the first subsystem to break is often an early one.
+- **Hold your instruments to a higher standard than the code they debug.**
+  Self-test before trusting (the UART loopback), bound every wait, degrade
+  loudly instead of hanging, and never silently drop diagnostic bytes.
 - **Absorb hardware irregularity at the lowest layer.** Uniform interrupt
   frames, synthesized from vectors that do and do not push error codes, make
   every layer above simpler and less bug-prone.

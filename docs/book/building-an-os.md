@@ -80,9 +80,11 @@ Two structural decisions shape almost every chapter, so learn them now:
 | 12 | [Storage: PCI, virtio, and the Block Layer](12-storage.md) | Enumerating a bus, driving a paravirtual device, caching blocks |
 | 13 | [graphfs: A Filesystem From First Principles](13-graphfs.md) | Copy-on-write, self-checksumming, and designing an on-disk format |
 | 14 | [Testing and Professional Discipline](14-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
-| 15 | [Where to Go Next](15-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
+| 15 | [How an OS Actually Gets Built](15-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
+| 16 | [Where to Go Next](16-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
 | A | [The Folklore Margin](appendix-a-folklore.md) | The tacit *whys* behind the code's decisions — naive alternative, real reason, failure avoided |
 | B | [The Lab Book](appendix-b-lab-book.md) | Graded hands-on labs: diagnosis drills, reproduce-from-tests, extensions, comparative reading |
+| C | [Bug Hunts](appendix-c-bug-hunts.md) | Three real bugs from this codebase's history, hunted end to end — plus the symptom triage table |
 
 ## A note on how to read it
 
@@ -101,7 +103,7 @@ work.
 
 # Chapter 0 — Prerequisites, Tools, and the Debug Loop
 
-The other fifteen chapters teach you how this operating system works. This one is
+The other sixteen chapters teach you how this operating system works. This one is
 different: it is about the *equipment* — what you need to know before you start,
 the tools you will live inside, the reference documents you will consult a hundred
 times a day, and above all the **debug loop**, because writing an OS is mostly
@@ -289,6 +291,9 @@ Mac, with a sanitizer and a stack trace, instead of on bare metal with neither.
 
 Here is the part no amount of reading replaces. When the kernel misbehaves, you
 have four instruments, in rough order of how often you reach for them.
+(Appendix C shows all four in action — three real bugs from this codebase's
+history hunted end to end — and closes with a symptom-to-instrument triage
+table worth keeping open while you work.)
 
 ### Instrument 1: serial `printf`, and loud failure
 
@@ -387,7 +392,7 @@ Put the instruments together into a way of working:
 1. **Read a chapter, then read its code** with the repo open, setting a gdb
    breakpoint in the function it describes and watching it run. Concept, then
    code, then *observed behavior* — all three, or it will not stick.
-2. **Reproduce a subsystem from its tests** (Chapter 15 §2): blank the body of
+2. **Reproduce a subsystem from its tests** (Chapter 16 §2): blank the body of
    `pmm_core.c` or `sched_core.c`, keep the header and host tests, and reimplement
    until `make check-host` is green. The tests are a specification; passing them
    from scratch is how you learn which invariants are load-bearing.
@@ -1068,7 +1073,85 @@ carved from that virtual space, then thread stacks from the heap. You cannot
 reorder any of it. When you design a bring-up sequence, write it as a dependency
 list first; the code order falls out of it.
 
-## 4.3 The GDT and TSS: segmentation's vestige, and the double-fault stack
+## 4.3 Building your voice: serial, VGA, kprintf, and panic
+
+Chapter 1 warned you: "There is no `printf` until you write one." This is
+where it gets written — and it deserves more than the one line most books
+give it, because the console stack is the instrument you will debug *every
+other subsystem* through. Code you use to find bugs must be held to a higher
+standard than the code you find them in: it has to work when the rest of the
+kernel is broken, and it must never make things worse. Every design choice
+below follows from that.
+
+As the commit ledger records (Chapter 15), `vsnprintf` was written and
+host-tested *before the bootloader existed* — the first freestanding code in
+the project ran under AddressSanitizer on a Mac before any code ran on the
+metal. `kernel/lib/fmt.c` is a complete C99 formatter (flags, width,
+precision, all the length modifiers) built as a pure core: it renders into a
+caller-supplied bounded buffer through a tiny `sink` that counts the full
+would-be length while never writing past capacity. No allocation, no
+recursion, no floating point — nothing that could fail in a way the caller
+has to handle, because this code runs inside `panic()`, where there is no
+one left to handle anything. Note its posture toward its own bugs: an
+unknown conversion is emitted verbatim, "so bugs are visible in output."
+Even the formatter fails loud.
+
+Above it sits a two-layer output path, and the layering is deliberate:
+
+- **`console.c`** fans each character out to both sinks — serial and VGA —
+  translating `\n` to `\r\n` for serial so the transcript reads correctly in
+  any terminal. Two sinks because they fail differently: VGA text mode is
+  always there on a BIOS boot but invisible to automation; serial is what
+  the test harness and your terminal actually read, but may legitimately be
+  absent.
+- **`kprintf.c`** formats into a 512-byte stack buffer, then emits the
+  whole line inside one interrupts-off section. The split matters: only the
+  *emission* needs atomicity (so two threads' lines cannot interleave
+  mid-line once the scheduler exists), so only the emission is inside the
+  critical section — formatting stays outside. Hold the lock for exactly
+  the operation that needs it. And when a message exceeds the buffer, it is
+  truncated *and marked* — `[kprintf: truncated]` — never silently clipped:
+  a diagnostic channel that silently drops bytes is a channel you can no
+  longer trust while debugging.
+
+The serial driver itself (`drivers/serial.c`, a 16550 UART) shows the
+instrument-grade standard in twenty lines. At init it runs a **loopback
+self-test** — puts the UART in loopback mode, sends `0xAE`, and requires
+that exact byte back before trusting the port; if the test fails, the driver
+marks itself absent and every later write becomes a no-op. And its transmit
+wait is **bounded**: if the transmitter never drains within a spin budget,
+the driver disables itself rather than spin forever —
+
+```c
+    /* Bounded wait so a wedged UART degrades output instead of hanging boot. */
+    for (uint32_t spin = 0; spin < 100000; spin++) {
+        if (inb(COM1 + REG_LSR) & LSR_THRE) {
+            outb(COM1 + REG_DATA, (uint8_t)c);
+            return;
+        }
+    }
+    serial_ok = false; /* transmitter never drained; stop trying */
+```
+
+Sit with why this matters: an instrument must never hang the patient. A
+`kprintf` that can wedge the boot converts every future debugging session
+into a game of "is it my bug or my print?" The rule generalizes to every
+diagnostic path you will ever write — bounded waits, self-checks before
+trust, graceful self-disabling — because the one thing an instrument cannot
+do is report its own failure.
+
+`panic()` completes the voice. It is deliberately tiny: print
+`PANIC: file:line:` (the macro captures the call site), format the message,
+print `system halted`, halt forever. File and line cost nothing and convert
+"the kernel died" into "the kernel died *here*, because *this*" — which,
+per Chapter 0, is the first thing you read in any hunt. The register dumps
+for hardware exceptions live one layer down, in the trap dispatcher (§4.5),
+where the trapframe actually is. Together they enforce the property the
+whole test architecture leans on (Chapter 14): every fatal path is loud,
+patterned, and machine-detectable — which is precisely what makes silence
+itself diagnostic.
+
+## 4.4 The GDT and TSS: segmentation's vestige, and the double-fault stack
 
 In long mode, segmentation is *mostly* dead — the flat 64-bit address space
 means code and data segments have base 0 and no limit. But the Global Descriptor
@@ -1100,7 +1183,7 @@ good IST stack means even a kernel-stack-overflow produces a diagnostic instead
 of a silent reboot. That is a deliberate investment in *debuggability of the
 worst case* — exactly where beginners under-invest.
 
-## 4.4 The IDT: 256 vectors and one dispatcher
+## 4.5 The IDT: 256 vectors and one dispatcher
 
 The Interrupt Descriptor Table maps each of the 256 interrupt/exception vectors
 to a handler. The CPU uses vectors 0–31 for architectural exceptions (0 = divide
@@ -1135,10 +1218,13 @@ decide whether a fault is fatal is the single choke point every fault flows
 through, and that place exists precisely because the IDT funnels all 256 vectors
 into one dispatcher.
 
-## 4.5 The transferable lessons
+## 4.6 The transferable lessons
 
 - **Bring up your output before anything that might fail.** You cannot debug
   what you cannot see, and the first subsystem to break is often an early one.
+- **Hold your instruments to a higher standard than the code they debug.**
+  Self-test before trusting (the UART loopback), bound every wait, degrade
+  loudly instead of hanging, and never silently drop diagnostic bytes.
 - **Absorb hardware irregularity at the lowest layer.** Uniform interrupt
   frames, synthesized from vectors that do and do not push error codes, make
   every layer above simpler and less bug-prone.
@@ -2766,7 +2852,47 @@ the real kernel flags). These are cheap, automatic, and non-negotiable — the p
 of a mechanical gate is that it removes an entire category of judgment call and
 bikeshedding from every code review.
 
-## 14.5 Why this is the chapter that matters most
+## 14.5 The design doc: deciding on paper, where changing your mind is free
+
+There is a second discipline running alongside the tests, easy to miss
+because its artifacts look like documentation: **every subsystem was
+designed in writing before or with its code, and the writing is maintained
+as part of the code.** Nine documents live in `docs/` — the boot protocol,
+the memory map, scheduling, userspace, storage, graphfs, the test strategy
+itself — and the commit ledger shows them landing *with* their subsystems,
+then updated in the same commit as every change ("Docs updated ... Version
+0.4.1"). This is a skill no OS book teaches, so learn it from the artifacts:
+open `docs/scheduling.md` and read its section list as a template —
+
+1. **Layering** — what sits above and below, and which direction calls flow.
+2. **The model** — the states and structures, in plain declarative sentences.
+3. **The mechanism** — context switch, preemption: how, and crucially *when*.
+4. **Invariants** — the one-sentence claims of Chapter 1 §1.4, numbered.
+5. **The locking story** — what protects shared state, and the honest note
+   that these sections become real spinlocks when SMP arrives.
+6. **The proof** — how the machine demonstrates the design works. The test
+   plan is part of the design, not an afterthought.
+
+That outline is the checklist of questions a subsystem design must answer
+*before* implementation: interface and ownership, invariants, atomicity,
+documented limits, and proof. Answering them on paper costs an hour and
+lets you discover the ordering hazard or the missing invariant while it is
+still a sentence you can rewrite — instead of a use-after-free you have to
+hunt (the entire zombie-stack discipline of Chapter 9 §9.4 is one design-doc
+sentence enforcing itself). Notice also what these docs are *not*: they do
+not restate the code, and they are not stale visions of what the code was
+once meant to be. A design doc that can drift from its code is worse than
+none, which is exactly why "docs updated" appears in the ledger next to
+every feature — same commit, same review, same gate. And when a document
+describes an interface two programs must agree on, it gets a version:
+`docs/boot-protocol.md` is "boot protocol v1," a numbered contract between
+loader and kernel (Chapter 3 §3.4). Comments hold the local, load-bearing
+constraint at the line that needs it; design docs hold the shape of the
+subsystem; commit messages hold the change and its proof. Three channels,
+three jobs — a codebase that uses all three deliberately is one you can
+join, or return to after a year, without an oral tradition.
+
+## 14.6 Why this is the chapter that matters most
 
 Here is the honest truth about building something this large and unforgiving: you
 will not write it correctly the first time. Nobody does. The bootloader's A20
@@ -2788,7 +2914,7 @@ Master this and everything else in the book becomes *achievable*, because you no
 longer need to be perfect — you need to be rigorous, and rigor is a system you
 build, not a talent you are born with.
 
-## 14.6 The transferable lessons
+## 14.7 The transferable lessons
 
 - **Test at three levels for three kinds of bug:** sanitized host tests for
   logic, in-kernel self-tests for codegen/environment, integration boot for the
@@ -2801,10 +2927,272 @@ build, not a talent you are born with.
   more than any other, is what compounds into a codebase you can trust.
 - **"Done" means the machine demonstrates it and keeps demonstrating it** — not
   that it worked once when you tried it.
+- **Design on paper first — interface, invariants, locking, limits, proof —
+  and keep the paper in the same commits as the code.** A decision is
+  cheapest to change while it is still a sentence.
 
 <div style="page-break-after: always"></div>
 
-# Chapter 15 — Where to Go Next
+# Chapter 15 — How an OS Actually Gets Built: Slices, Gates, and the Definition of Done
+
+Every OS book — this one included, until now — presents subsystems in their
+finished form, ordered by dependency: memory before scheduling, scheduling
+before processes. That ordering is true but it answers the wrong question.
+The question you actually face on day one of your own kernel is not "how
+does a scheduler work" — it is *what do I build first, how much of it, and
+how do I know when to stop and move on?* Sequencing is the invisible half of
+systems engineering, and almost nobody teaches it because almost no codebase
+preserves the evidence.
+
+This one does. The git history of this repository is a complete, unedited
+ledger: nineteen code commits from empty directory to a filesystem, every
+one of them ending with `make check` green, every message recording what
+landed and what proved it. This chapter reads that ledger as what it is —
+a decision journal — and extracts the sequencing discipline from it.
+
+## 15.1 The ledger
+
+Read down this table slowly; the order itself is the curriculum.
+
+| # | Commit | What landed | What proved it |
+|---|--------|-------------|----------------|
+| 1 | `build:` | Makefile, `-Werror`, format/tidy gates, sanitizer test scaffold | the gates themselves |
+| 2 | `kernel/lib:` | freestanding `string.c` + full C99 `vsnprintf` | 25 host tests, 170 assertions, ASan/UBSan |
+| 3 | `boot:` | two-stage bootloader: A20, E820, unreal-mode load, long mode | every failure path prints `ERR:` |
+| 4 | `kernel:` | higher-half entry, serial+VGA consoles, `kprintf`, `panic`, selftest | boot-time assertion suite |
+| 5 | `tools+tests:` | disk-image assembler, headless QEMU harness | ordered serial markers, fail on `PANIC`/`ERR:` |
+| 6 | `docs:` | README, boot protocol, architecture, memory map, test strategy | — (the contracts, in writing) |
+| 7 | `arch:` | GDT/TSS (IST for `#DF`), 256-vector IDT, trap dispatch, PIC | `int3` round trip in selftest |
+| 8 | `drivers:` | IRQ layer, 100 Hz PIT, PS/2 keyboard | timer marker; echo loop |
+| 9 | `mm:` | physical frame allocator over E820 | 3,318 host assertions; alloc/write/free selftest |
+| 10 | `mm:` | kernel page tables: HHDM, W^X image, NX | W^X verified by provoked faults at boot |
+| 11 | `mm:` | slab heap | 20k-round randomized stress vs. shadow model |
+| 12 | `sched:` | threads, context switch, preemption, sleep/join | `"abcabcabcabc"` interleave marker |
+| 13 | `user:` | ring 3, `SYSCALL`/`SYSRET`, user address spaces | `hello from ring 3` — printed by a 92-byte flat binary |
+| 14 | `exec:` | ELF64 validator + loader, C userspace with own toolchain rules | 7 new host suites; C init's exit status asserts the ABI |
+| 15 | `syscall:` | full caller-saved register preservation (a found latent bug) | sentinel-register test; old stub demonstrably fails it |
+| 16 | `proc:` | fork, execve, wait4, exit | fork/exec/wait round trip; frame-leak accounting to zero |
+| 17 | `trap:` | ring-3 faults kill the process, not the kernel | two deliberately crashed children, reaped with correct signals |
+| 18 | `storage:` | PCI scan, virtio-blk, cached block layer | write/readback/restore against the real device |
+| 19 | `fs:` | graphfs on-disk format core, mkfs/fsck | 77 host tests; `make check-fsck` gates the built image |
+
+Three phases of reading. First pass: notice it is the dependency order you
+already know. Second pass: notice what is *interleaved* with the features —
+gates first, library before bootloader, harness immediately after first
+boot, docs before the second phase, a bug-fix slice in the middle of Phase
+4\. Third pass: notice the right-hand column is never empty (except the
+docs commit — whose artifact *is* the proof). That column is the subject of
+§15.4.
+
+## 15.2 The net went up before the wire
+
+The single most instructive fact in the ledger is commit 2. Before there
+was a bootloader — before this project could execute *anything* on the
+machine it targets — it wrote `memcpy` and `vsnprintf` and put them under
+AddressSanitizer on the host. The first code written for the freestanding
+x86-64 kernel ran first on a Mac, under a sanitizer, called by a unit test.
+
+That looks backwards until you weigh what each piece is *for*. The
+bootloader is going to fail — real-mode assembly always does — and when it
+fails, the only diagnostic channel will be whatever the kernel can print.
+So the printing machinery must already be trustworthy, and the only place
+to make it trustworthy before a kernel exists is the host. Commit 2 is the
+pure-core pattern (Chapter 1 §1.2) applied to *sequencing*: build each
+tool's safety net before the work that will need the tool.
+
+The same logic explains commit 5. The instant there was one bootable image,
+the next commit was not a feature — it was the harness that boots that
+image headless and asserts its output. From that moment forward, *nothing
+was ever demonstrated by hand again.* Every subsequent row in the ledger
+inherits an automated definition of "still works." The cost of the harness
+was one commit; the return is that eighteen commits of accumulated behavior
+are re-proven on every `make check` forever (Chapter 14's ratchet, seen
+from the other end: the ratchet had to be *installed early* to be worth
+anything).
+
+And commit 6 — pure documentation — lands before the first line of Phase 2.
+The boot protocol was written down as a versioned contract at the moment
+exactly two programs depended on it and both were fresh in mind. Contracts
+are cheapest to write at the boundary where they were just negotiated.
+
+## 15.3 Vertical slices, and the smallest observable win
+
+Look at how Phase 4 — userspace — is cut. A lesser plan says "implement
+processes": ELF loading, fork, exec, wait, fault handling, all of it, then
+debug the pile. The ledger instead shows four slices, each independently
+observable:
+
+1. **Commit 13: a 92-byte flat binary.** Not ELF. Not C. A hand-assembled
+   blob embedded in kernel `.rodata`, copied into a fresh address space,
+   entered via `iretq`. Its entire job is to prove the *scariest single
+   transition in the project* — ring 3 entry, `SYSCALL` return, per-thread
+   kernel stacks, address-space isolation — with the fewest moving parts
+   that can possibly print `hello from ring 3`. Every part of the ELF
+   pipeline it omits is a part that *cannot be the bug* when the ring
+   transition misbehaves.
+2. **Commit 14: now ELF, now C.** With the ring transition proven and
+   marker-pinned, the program format graduates: a real validator (pure,
+   host-tested, one targeted mutation test per rejection path), a real
+   loader, a real C runtime. If something breaks now, it is in the new
+   layer — the old marker still passing says the transition underneath is
+   intact. This is bisection *built into the schedule*.
+3. **Commit 16: fork/exec/wait**, standing on both. The process table is a
+   pure state machine (host-tested), and the syscall frame from slice 15
+   turns fork's "clone the user context" into a struct copy.
+4. **Commit 17: fault isolation** — the hardening slice that closes the
+   phase's documented gap, converting "a buggy process panics the kernel"
+   into one diagnostic line and a `SIGSEGV` delivered through `wait4`.
+
+Each slice ends at a *marker* — an observable, machine-checkable behavior
+that did not exist before it. That is what "vertical slice" means here: not
+"a layer," but a path all the way through the system to something you can
+see. The discipline generalizes to every phase in the ledger: the block
+layer landed with a write/readback/restore round trip against a real
+device *before* any filesystem existed to need it; graphfs landed as an
+on-disk format with host tools and tests *before* the kernel could mount
+it. Always cut so that the end of the slice is a demonstration.
+
+When you plan your own next step, the question is not "what component comes
+next" but **"what is the smallest thing I could build that the serial
+console could prove?"** — and then: what is the least machinery that
+demonstration needs? The 92-byte binary is the canonical answer. It is not
+a toy; it is a scope decision of professional precision — small enough that
+ring-transition bugs have nowhere to hide, real enough that the marker it
+prints is asserted forever after.
+
+## 15.4 The definition of done, in the authors' own hand
+
+Read the closing lines of the ledger's commit messages, because they are a
+definition of "done" stated nineteen times:
+
+> "Host tests: 37/37, 3318 assertions."
+> "Proven on every boot and asserted by the integration test."
+> "Verified the test catches the regression: with the kill path disabled,
+> the same boot dies in a kernel panic at the child's page fault."
+> "After init is reaped the kernel asserts the process table is empty and
+> the physical frame count matches the pre-launch value."
+> "Docs updated ... Version 0.4.1. Phase 4 complete."
+
+Four ingredients recur. **Proof at the right level** — pure logic cites host
+assertions, boot-visible behavior cites markers (Chapter 14 §14.4's rule 3,
+applied per commit, not per release). **Proof of the proof** — commit 17
+did not just add a test; it broke the fix on purpose and recorded that the
+test fails, because a test you have never seen fail proves nothing.
+**Conservation checks** — "frame count matches pre-launch" is a *leak
+ledger*: the whole fork/exec/wait cycle must return the machine to its
+exact prior accounting. And **the paperwork** — docs and version roll in
+the same commit, because a feature whose documentation lags is not done, it
+is *undone in a way you have not noticed yet*.
+
+Notice also what commit 15 is: not a feature. A latent bug (Appendix C
+§C.1) was found mid-phase, and the response was a dedicated slice — fix,
+test that fails without it, contract documented — inserted into the
+sequence before fork was allowed to build on the flawed frame. Sequencing
+is not just ordering the features; it is *granting hardening the same
+slice-level dignity as features*, at the moment the debt is found, not "in
+a cleanup pass later" that history shows never comes.
+
+## 15.5 Changing your mind is a slice, too
+
+Commit 18 opens with something you will almost never see preserved:
+"The direction for this phase changed by decision: the native filesystem
+will be graphfs ... not ext2. ext2 moves to Phase 7 as an optional import
+path."
+
+The original roadmap said ext2. Between phases, the plan changed — for
+product reasons (the AI-native semantic layer of Phase 6 wants a graph
+substrate, Chapter 13). What the ledger teaches is not *that* plans change
+— everyone knows that — but the *mechanics* of changing one well:
+
+- **The pivot happened at a slice boundary**, not mid-implementation. No
+  half-built ext2 was thrown away, because Phase 5's first slice (PCI,
+  virtio, block layer) was deliberately *filesystem-agnostic* — the layer
+  boundary held, so the decision above it stayed cheap to revisit.
+- **The displaced work was re-scoped, not deleted.** ext2 moved to Phase 7
+  with a stated role. A plan is a priority queue, not a promise.
+- **The decision was recorded where the code landed** — first line of the
+  commit, plus a design doc (`docs/storage.md`) written before the slice.
+  Two years from now, "why graphfs and not ext2" has an answer in `git log`
+  instead of in someone's departed memory. (Chapter 0's advice to read real
+  kernels' changelogs is this same channel, consumed from the other side.)
+
+## 15.6 Hooks, not half-features
+
+Sequencing has a paradox: you must not build ahead (complete-or-absent,
+Chapter 1 §1.3), yet the ledger is full of Phase-2 decisions that Phase-4
+features "finally earn" — the GDT selector layout arranged for `SYSRET`'s
+`+8/+16` arithmetic two phases early; the syscall ABI matched to Linux five
+phases before the compatibility layer; `kstack_top` exported to a scheduler
+three chapters away; `TAG`/`REF` edge types reserved in the graphfs format
+for Phase 6.
+
+The resolution is *where* the foresight lives. Every one of those is a
+**hook**: a choice made at an interface — an ordering, a constant, a
+reserved value, an exported symbol — that costs nothing now and cannot rot,
+because it has no moving parts. None of them is a half-feature: there is no
+dormant SMP path, no stubbed-out COW handler, no "TODO: ext2" directory.
+The rule the ledger models: **spend foresight freely on interfaces, never
+on implementations.** An interface shaped for tomorrow is a constraint you
+carry; an implementation built for tomorrow is a liability you debug.
+(Appendix A's fork entry shows the same rule from the other side: COW was
+*not* built early, precisely because it is an implementation, not an
+interface.)
+
+## 15.7 Scoping your own next slice
+
+Distilled from the ledger, the questions to answer — in writing, before the
+first line of code — when you cut your next slice on your own kernel:
+
+1. **What will the serial console say when this works?** If you cannot name
+   the marker, the slice has no observable end and will sprawl.
+2. **What is the least machinery that demonstration needs?** Everything
+   else you are tempted to include is a place for bugs to hide behind other
+   bugs. (The answer can be as small as 92 bytes.)
+3. **Which part is pure?** That part gets a `_core.c`, host tests, and a
+   sanitizer before it ever runs on metal.
+4. **What is explicitly out?** Written down, with the failure mode for
+   anything outside the boundary (`-ENOSYS`, a documented limit). "Out" is
+   a deliverable, not an omission.
+5. **What does the layer below have to promise?** If the promise is not
+   already written down, writing it down is part of *this* slice — that is
+   how the boot protocol and `docs/userspace.md` came to exist.
+6. **What would prove a regression?** The marker or test this slice adds is
+   permanent (Chapter 14 §14.2); name what it will catch.
+
+Answer those six and the slice plans itself. Most of what looks like
+engineering judgment in the ledger is these questions, asked every time,
+answered honestly.
+
+## 15.8 The transferable lessons
+
+- **Sequence so that every step's failure is debuggable with the tools of
+  the previous step.** Library under sanitizers, then bootloader with
+  `ERR:` prints, then a kernel that can `kprintf`, then a harness that
+  reads it — each layer is the diagnostic channel for the next.
+- **Automate the demonstration the moment there is one.** The harness
+  commit, one slot after first boot, is what turned nineteen commits of
+  behavior into a ratchet instead of a memory.
+- **Cut slices vertically, ending at something observable.** "The smallest
+  thing the serial console can prove" beats "the next component" as a unit
+  of work, every time.
+- **"Done" is a proof, a proof of the proof, a conservation check, and the
+  paperwork** — per commit, in the commit.
+- **Change plans at slice boundaries, in writing, where the code lives.**
+  And keep the layer boundaries honest so that changing the plan stays
+  cheap.
+- **Foresight goes in interfaces; implementations stay in the present.**
+  Hooks are free forever; half-features are debt from day one.
+
+One more thing the ledger shows: it took nineteen commits to get from an
+empty directory to a copy-on-write filesystem — not nineteen hundred. The
+sequencing discipline is not overhead on the real work; it is why the real
+work compounded instead of collapsing. Where the road goes from here — the
+VFS, the AI service layer, Linux compatibility, real hardware — is the
+final chapter's subject.
+
+<div style="page-break-after: always"></div>
+
+# Chapter 16 — Where to Go Next
 
 You have followed the system from the firmware's first instruction to a
 crash-consistent filesystem holding the programs the kernel boots. That is a
@@ -2815,7 +3203,7 @@ how the concepts *connect* rather than as isolated exam answers. This final
 chapter is about turning that understanding into mastery: what to build next, and
 how to keep growing.
 
-## 15.1 The road this project is on
+## 16.1 The road this project is on
 
 The roadmap (README) runs to phase 10, and each remaining phase is a chance to
 learn a major subsystem:
@@ -2850,7 +3238,7 @@ why the PCI scan is written to extend to bridges, why UEFI and bare-metal driver
 today. Designing for a target you have not reached yet, at the interfaces rather
 than the implementations, is the through-line.
 
-## 15.2 How to actually get better at this
+## 16.2 How to actually get better at this
 
 Reading a system teaches you a lot; the next order of magnitude comes from
 *changing* one. [Appendix B](appendix-b-lab-book.md) turns everything below into
@@ -2879,7 +3267,7 @@ The short version, roughly in order:
    QEMU forgives, real firmware and real devices will not, and the gap *is* the
    curriculum.
 
-## 15.3 The habits that compound
+## 16.3 The habits that compound
 
 Strip away the specifics and the transferable lessons from every chapter collapse
 into a handful of habits. These are what to carry into any systems work, on any
@@ -2905,7 +3293,7 @@ codebase:
 - **Prove it every time, and never delete the proof.** Correctness is cumulative
   or it is temporary.
 
-## 15.4 A closing word
+## 16.4 A closing word
 
 The reason an operating system is the classic proving ground for a systems
 programmer is not that it is the hardest code to write line by line — plenty of
@@ -3366,3 +3754,320 @@ down.
 
 <div style="page-break-after: always"></div>
 
+# Appendix C — Bug Hunts: Three Real Bugs, End to End
+
+Every chapter tells you *what* the debug loop is. This appendix shows you what
+it feels like to run it. Three real bugs from this codebase's own history —
+each one attested in the commit record — walked end to end: the symptom (or
+the eerie absence of one), the chase, the fix, and the regression test that
+makes the bug unrepeatable. The narrative of each chase is reconstructed from
+the commits, the code, and the way the instruments behave; the bugs, the
+fixes, and the proofs are exactly as the record states them.
+
+Read these the way you would read annotated chess games. The point is not the
+specific bugs — you will never hit these three exactly — it is the *move
+order*: what the debugger looked at first, which instrument answered which
+question, and where the hunt actually ended (hint: never at "it works now").
+
+The appendix ends with the **triage table**: symptom → first suspicion →
+first instrument, for the dozen failure shapes that cover most of what bare
+metal will throw at you.
+
+---
+
+## C.1 The bug that produced no symptom: the syscall register clobber
+
+**The record:** commit `a58bbe1`, "syscall: preserve all caller-saved user
+registers across the entry," landed mid-Phase 4, between the first C
+userspace program and fork.
+
+### The setting
+
+By this point the kernel had a working `SYSCALL`/`SYSRET` path. The entry
+stub parked the user stack pointer, adopted the kernel stack, saved the three
+registers the hardware itself involves — `rsp`, `rcx` (return RIP), `r11`
+(RFLAGS) — and called the C dispatcher. Every test was green: fifteen serial
+markers, the C init printing from ring 3, exit status 0. Nothing was wrong.
+
+That sentence should already bother you. "Every test was green" is a
+statement about the tests, not about the code.
+
+### The chase
+
+This hunt did not start with a crash. It started with someone reading the
+entry stub side by side with the contract it claims to implement — the Linux
+x86_64 syscall ABI, which this kernel adopted deliberately (Chapter 10). The
+contract says: across a syscall, userspace sees only `rax` (the result),
+`rcx`, and `r11` (hardware-clobbered) change. **Every other register is
+promised back intact.**
+
+Now look at what the stub actually preserved: `rsp`, `rcx`, `r11`. And ask
+the question that cracks it open: *who else touches registers between
+`syscall` and `sysret`?* The C dispatcher does — and the System V ABI
+entitles any C function to trash every caller-saved register:
+`rdi, rsi, rdx, r10 (as rcx), r8, r9`, and more. The stub was relying on the
+C dispatch to happen not to clobber the six argument registers.
+
+So why was everything green? Because init's syscall wrappers listed
+`rcx`/`r11` as clobbers and the compiler — so far, by pure register-allocation
+luck — had never kept a live value in `rdi` through `r9` across a `syscall`
+instruction. The commit message names the blast radius precisely: userspace
+was "one register-allocation decision away from silent corruption."
+
+Dwell on what the symptom *would* have been, because this is the shape of
+bug that costs a week: some future program's local variable changes value
+across an innocent `write()`. No fault. No panic. The kernel is fine —
+it is technically doing everything its tests assert. The corruption appears
+only with the compiler versions and optimization levels that happen to keep
+a value live in the wrong register, and it moves when you add a `kprintf`.
+Debugging that from the symptom end is archaeology. Finding it from the
+contract end was one careful read.
+
+### The fix
+
+Mechanically small: push the full caller-saved set on entry, pop it before
+`sysret`, keep `rsp` 16-aligned at the `call` (ten pushes at the time). The
+interesting part is what the fix *became*. One slice later, fork needed the
+complete user register state to clone a process — and the natural
+implementation was to widen this same frame to all fifteen GPRs. Look at
+`syscall_entry.asm` today: the entry builds a complete `struct
+syscall_frame`, the dispatcher gets a pointer to it, and `fork()` clones a
+user context by copying that struct. The bug fix's shape turned out to be
+the foundation of the next feature. That is not luck; honoring the full
+contract usually *is* the design the next feature needs.
+
+### The proof
+
+Rule 2 of the testing policy (Chapter 14): a bug fix lands with a test that
+failed before it. The test here is worth studying because getting it right
+is subtle — you are trying to catch the *compiler* being entitled to hurt
+you, using the compiler:
+
+```c
+static int regs_survive_syscall(void) {
+    long rdi = 0x1111, rsi = 0x2222, rdx = 0x3333;
+    register long r10 __asm__("r10") = 0x4444;
+    register long r8  __asm__("r8")  = 0x5555;
+    register long r9  __asm__("r9")  = 0x6666;
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret), "+D"(rdi), "+S"(rsi), "+d"(rdx),
+                       "+r"(r10), "+r"(r8), "+r"(r9)
+                     : "a"((long)SYS_getpid)
+                     : "rcx", "r11", "memory");
+    /* ...verify all six sentinels... */
+```
+
+The `"+"` constraints are the whole trick: they force the compiler to treat
+each register as an *output* too — to read reality back after the `syscall`
+instead of assuming the asm preserved its inputs. Sentinels in all six
+argument registers, checked after. The commit records the verification both
+ways: against the old stub, init exits with status 10 and the boot test
+fails; with the fix, all fifteen markers pass.
+
+### What to keep
+
+- **Audit entry paths against the contract as written, not against "it
+  works."** Green tests measure what the tests assert, and a latent contract
+  violation asserts nothing until the day it corrupts something.
+- **The best time to find a bug is before it has a symptom.** The
+  contract-vs-code read is a debugging instrument too — arguably the highest-
+  yield one, and the only one that works on bugs that haven't fired yet.
+- **When you fix a contract bug, fix the written contract too.** The same
+  commit added a "preserved" row to `docs/userspace.md`'s ABI table. The next
+  reader of the stub now has the promise in front of them.
+
+---
+
+## C.2 The pointer that outlived its address space: the PMM bitmap and the HHDM flip
+
+**The record:** commit `0c89e13`, "mm: kernel page tables," which states:
+"The boot test caught two real bugs during bring-up: the direct-map ceiling
+following a reserved 1 TiB PCI hole, and the PMM bitmap pointer going stale
+across the hhdm_base flip." This hunt is the second one; §C.3 is the first.
+
+### The setting
+
+Chapter 7's moment of maximum danger: `vmm_init()` builds the kernel's real
+page tables and switches `CR3` away from the bootloader's throwaway
+mappings. Before the switch, physical memory is reachable through the boot
+alias; after it, through the brand-new higher-half direct map at
+`0xffff800000000000` — and the old identity map is *gone, on purpose* (an
+absent mapping is a null-pointer trap; Chapter 7 §7.2). The kernel's
+`phys_to_virt()` reads a runtime `hhdm_base` that `vmm_init()` flips from
+the boot alias to the real HHDM at the moment of the switch.
+
+The physical-memory allocator, brought up one commit earlier, keeps its
+bitmap in a frame it chose at init time — and it reaches that bitmap through
+a **virtual pointer it computed once, at init, under the old mapping**.
+
+You can see it now. The whole point of a hunt narrative, though, is that at
+the time, nobody could.
+
+### The chase
+
+The symptom: boot proceeds normally — `pmm:` marker, then
+`vmm: kernel page tables active` — and then dies in a page-fault panic the
+next time anything allocates a frame. The integration test fails on a
+missing marker with a `PANIC` line in the transcript.
+
+Move one: **read the panic.** This same commit had just built the decoding
+page-fault handler — the one that prints access type, privilege, and `CR2`
+before dying (Chapter 7 §7.4) — and this bug is the reason that investment
+pays back immediately. The dump says: write, ring 0, to a low-ish virtual
+address that is *not* in the higher half and *not* in the new direct map.
+
+Move two: **ask where that address came from.** It is not garbage — it is
+suspiciously well-formed, exactly where the PMM's bitmap used to live under
+the boot-era mapping. The faulting RIP is inside the frame allocator. So the
+allocator is writing to its bitmap through a pointer that was true fifteen
+microseconds ago, under an address-space regime that no longer exists.
+
+Move three: generalize before fixing. The question is not "how do I fix the
+PMM" but **"who else cached a translation across the flip?"** Grep every
+call site that stores the result of `phys_to_virt()` (or any boot-era
+virtual address) into a long-lived variable. The audit found the same
+disease in the VGA driver, which had cached its aperture pointer.
+
+### The fix
+
+Two fixes, matched to how each caller uses its pointer. The PMM gets an
+explicit `pmm_rebase()` call — `vmm_init()` tells it "the world moved,
+re-derive your bitmap pointer" — which is honest about the dependency:
+the *ordering* between the VMM flip and the rebase is now visible in
+`vmm_init`'s code instead of implicit in a stale pointer. The VGA driver
+stops caching entirely and resolves its aperture through `phys_to_virt()`
+on every call — correct by construction, at a cost that is irrelevant for
+a text console. Chapter 6 §6.3 tells the PMM half of this story as a design
+pattern; this is the bug that made it one.
+
+### The proof
+
+The boot selftests added in the same commit assert the new regime directly:
+HHDM translation is verified, the old identity map is verified *gone*, and
+the PMM's frame alloc/write/free selftest — which runs after `vmm_init` —
+now exercises the rebased pointer on every boot. The bug cannot return
+silently, because the very next boot repeats the exact sequence that
+exposed it.
+
+### What to keep
+
+- **A cached translation is a bet that the mapping regime never changes.**
+  Every pointer you store is implicitly `virt_of(phys, mapping_epoch)`. When
+  an init step changes the epoch — enabling paging, moving to a new CR3,
+  tearing down a boot alias — every stored translation is suspect. Audit
+  them *as part of designing the transition*, not after the panic.
+- **When one caller has a staleness bug, grep for the whole species.** The
+  second infection (VGA) was found by audit, not by symptom. One instance of
+  a bug is a claim about the pattern, not just the site.
+- **Build the decoder before the fault.** The reason this hunt took minutes
+  and not hours is that the page-fault handler printed `CR2` and the access
+  type from day one. Diagnostics built at the choke point are an investment
+  that pays on the *first* bug after them — which, here, was the same commit.
+
+---
+
+## C.3 The machine that told the truth strangely: the 1 TiB direct-map ceiling
+
+**The record:** the first of `0c89e13`'s two boot-test catches: "the
+direct-map ceiling following a reserved 1 TiB PCI hole."
+
+### The setting
+
+`vmm_init()` must decide how much physical address space the direct map
+covers. The natural implementation reads the E820 map and covers everything
+up to the highest address any entry mentions — one loop, obviously correct.
+
+Then the boot test ran against QEMU's actual E820 map, which contains a
+**reserved** entry parked around the 1 TiB mark — a 64-bit PCI MMIO hole,
+a completely legitimate thing for firmware to report. The "obviously
+correct" ceiling followed it.
+
+### The chase
+
+The symptom is instructive because nothing about it says "PCI hole": the
+boot test flags the run, and the numbers in the transcript are quietly
+absurd — the `pmm:` marker reports ~255 MiB of RAM, and `vmm_init` is
+building a direct map three orders of magnitude larger.
+
+Move one: **make the invisible loop visible.** A `kprintf` of the computed
+ceiling before the mapping loop is one line, and it prints a number with
+twelve zeros. There is the bug, in your own output: the kernel is dutifully
+building 2 MiB mappings for a *terabyte* of address space that contains a
+few hundred MiB of RAM — over a thousand page-table frames, megabytes of a
+small machine's memory and a flood of TLB-hostile mappings spent describing
+nothing. On a machine with a bigger hole, or a design mapping at 4 KiB
+granularity (where the same tables cost five hundred times more), this
+graduates from waste to frame exhaustion mid-`vmm_init`.
+
+Move two: interrogate the assumption. The E820 map is not "the RAM map" —
+it is the firmware's report of *everything it knows about the physical
+address space*, and reserved entries can sit anywhere, including absurdly
+high. The direct map's job is to reach **RAM** (plus the low MMIO window the
+kernel actually uses). The ceiling should follow the highest *usable* entry,
+not the highest entry.
+
+### The fix
+
+The direct map covers all usable RAM plus the first 4 GiB (the legacy/PCI
+MMIO window), explicitly — the reserved outlier no longer participates in
+the ceiling. The distinction is even visible in cache attributes: RAM is
+mapped write-back, the non-RAM window cache-disabled (Chapter 7).
+
+### The proof
+
+The boot selftests verify HHDM translation against the real map, and the
+`pmm:`/`vmm:` markers — asserted on every boot — pin the observable
+behavior: the frame budget survives `vmm_init` with hundreds of MiB free.
+A regression toward "map everything E820 mentions" would blow the frame
+accounting the very next selftest checks.
+
+### What to keep
+
+- **Firmware tables describe the address space, not your memory.** Reserved
+  entries at absurd addresses are not malformed input; they are the normal
+  weather of real machines. Any loop over a firmware table needs to decide,
+  explicitly, which *kinds* of entry drive which decision.
+- **When a loop misbehaves, print its bounds before stepping through its
+  body.** One `kprintf` of the ceiling turned a mystery hang into an
+  arithmetic error you could read off the screen.
+- **This is why the integration test runs on every commit.** Nothing about
+  the ceiling logic looks wrong on a whiteboard; it is wrong against one
+  particular machine's E820 map. Bugs like this are found by *booting*,
+  which is exactly what `make check` refuses to let you skip.
+
+---
+
+## C.4 The triage table
+
+The three hunts above, and every drill in Appendix B, run on the same first
+move: **classify the symptom, then reach for the instrument that classifies
+it further.** This table is that first move, precomputed. It assumes the
+codebase's own discipline — every fatal path loud (`PANIC`/`ERR:`), the
+decoding fault handlers installed — which is what makes the symptoms
+distinguishable at all. (Instruments: Chapter 0 §0.5.)
+
+| Symptom | First suspicion | First instrument |
+|---|---|---|
+| Silent hang, no output at all | Wedged before a loud failure point: early spin loop, fault before the IDT exists, deadlock with interrupts off | `kprintf` bisection toward the last line printed; then `-d int` |
+| Instant reboot, or a reboot loop | Triple fault: a fault whose handler faulted | `-d int -no-reboot -no-shutdown`; read the **first** exception in the log, not the last |
+| `PANIC` with a register dump | The kernel caught its own bug — the easy case | Read file:line and the dump; map RIP to source with gdb/`addr2line` on `kernel.elf` |
+| `#PF` panic | Bad pointer — but *whose*? | Read `CR2` and the error-code bits (present/write/user/fetch); then ask "who computed this address," not "who dereferenced it" |
+| `#GP` panic | Error code ≠ 0: a segment selector is involved (IDT/GDT entry, `iretq` frame). Error code 0: non-canonical address, privilege violation, or a bad MSR write | Decode the error code against SDM Vol. 3A Ch. 6.15; inspect the frame you were returning through |
+| `#UD` panic | Execution landed somewhere that is not code | Is RIP inside `.text`? Yes → a deliberate `ud2`/assert. No → wild jump: corrupted function pointer or smashed return address |
+| `#DF` on the IST stack | Kernel stack overflow, or a fault taken while delivering a fault | Check saved RSP against the thread's stack bounds; thank the IST slot (Chapter 4) for the diagnostic |
+| Serial garbled or absent, VGA fine | UART init or baud divisor; or serial self-disabled after a wedged transmitter | Loopback self-test result; simplify to `-serial stdio` and retest |
+| Wrong values, no fault, kernel healthy | Memory corruption or a violated contract (DMA landing wrong, uaccess miss, register clobber — see §C.1) | Move the logic into a host test under ASan/UBSan; on metal, bisect with `KASSERT`s of the nearest invariant |
+| Green on host tests, dies on metal | Codegen/environment gap: code model, no-SSE, red zone, alignment, real page tables | Level 2 territory — reproduce in `selftest.c` under the real toolchain flags |
+| Passes `make run`, fails `make check` | Timing, or marker order/wording drift | Diff the harness transcript against the expected marker list |
+| Appears/vanishes with unrelated edits | Layout-sensitive latent bug: uninitialized memory, stack overflow, misalignment | Stop chasing the trigger; hunt the sensitivity — sanitizers on the nearest pure core, stack canary checks |
+
+Two rules complete the table. First, **silence is data**: in a codebase
+where every failure is loud, the absence of output localizes the failure to
+the regions that cannot yet speak (Chapter 14 §14.3). Second, **the last
+move of every hunt is a test** — the table gets you to a cause, but the hunt
+ends only when the cause cannot recur unannounced. That is the difference
+between "fixed it" and "finished it," and it is the through-line of all
+three stories above.
+
+<div style="page-break-after: always"></div>

@@ -118,7 +118,47 @@ the real kernel flags). These are cheap, automatic, and non-negotiable — the p
 of a mechanical gate is that it removes an entire category of judgment call and
 bikeshedding from every code review.
 
-## 14.5 Why this is the chapter that matters most
+## 14.5 The design doc: deciding on paper, where changing your mind is free
+
+There is a second discipline running alongside the tests, easy to miss
+because its artifacts look like documentation: **every subsystem was
+designed in writing before or with its code, and the writing is maintained
+as part of the code.** Nine documents live in `docs/` — the boot protocol,
+the memory map, scheduling, userspace, storage, graphfs, the test strategy
+itself — and the commit ledger shows them landing *with* their subsystems,
+then updated in the same commit as every change ("Docs updated ... Version
+0.4.1"). This is a skill no OS book teaches, so learn it from the artifacts:
+open `docs/scheduling.md` and read its section list as a template —
+
+1. **Layering** — what sits above and below, and which direction calls flow.
+2. **The model** — the states and structures, in plain declarative sentences.
+3. **The mechanism** — context switch, preemption: how, and crucially *when*.
+4. **Invariants** — the one-sentence claims of Chapter 1 §1.4, numbered.
+5. **The locking story** — what protects shared state, and the honest note
+   that these sections become real spinlocks when SMP arrives.
+6. **The proof** — how the machine demonstrates the design works. The test
+   plan is part of the design, not an afterthought.
+
+That outline is the checklist of questions a subsystem design must answer
+*before* implementation: interface and ownership, invariants, atomicity,
+documented limits, and proof. Answering them on paper costs an hour and
+lets you discover the ordering hazard or the missing invariant while it is
+still a sentence you can rewrite — instead of a use-after-free you have to
+hunt (the entire zombie-stack discipline of Chapter 9 §9.4 is one design-doc
+sentence enforcing itself). Notice also what these docs are *not*: they do
+not restate the code, and they are not stale visions of what the code was
+once meant to be. A design doc that can drift from its code is worse than
+none, which is exactly why "docs updated" appears in the ledger next to
+every feature — same commit, same review, same gate. And when a document
+describes an interface two programs must agree on, it gets a version:
+`docs/boot-protocol.md` is "boot protocol v1," a numbered contract between
+loader and kernel (Chapter 3 §3.4). Comments hold the local, load-bearing
+constraint at the line that needs it; design docs hold the shape of the
+subsystem; commit messages hold the change and its proof. Three channels,
+three jobs — a codebase that uses all three deliberately is one you can
+join, or return to after a year, without an oral tradition.
+
+## 14.6 Why this is the chapter that matters most
 
 Here is the honest truth about building something this large and unforgiving: you
 will not write it correctly the first time. Nobody does. The bootloader's A20
@@ -140,7 +180,7 @@ Master this and everything else in the book becomes *achievable*, because you no
 longer need to be perfect — you need to be rigorous, and rigor is a system you
 build, not a talent you are born with.
 
-## 14.6 The transferable lessons
+## 14.7 The transferable lessons
 
 - **Test at three levels for three kinds of bug:** sanitized host tests for
   logic, in-kernel self-tests for codegen/environment, integration boot for the
@@ -153,3 +193,6 @@ build, not a talent you are born with.
   more than any other, is what compounds into a codebase you can trust.
 - **"Done" means the machine demonstrates it and keeps demonstrating it** — not
   that it worked once when you tried it.
+- **Design on paper first — interface, invariants, locking, limits, proof —
+  and keep the paper in the same commits as the code.** A decision is
+  cheapest to change while it is still a sentence.

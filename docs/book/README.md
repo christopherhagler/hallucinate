@@ -74,9 +74,11 @@ Two structural decisions shape almost every chapter, so learn them now:
 | 12 | [Storage: PCI, virtio, and the Block Layer](12-storage.md) | Enumerating a bus, driving a paravirtual device, caching blocks |
 | 13 | [graphfs: A Filesystem From First Principles](13-graphfs.md) | Copy-on-write, self-checksumming, and designing an on-disk format |
 | 14 | [Testing and Professional Discipline](14-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
-| 15 | [Where to Go Next](15-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
+| 15 | [How an OS Actually Gets Built](15-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
+| 16 | [Where to Go Next](16-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
 | A | [The Folklore Margin](appendix-a-folklore.md) | The tacit *whys* behind the code's decisions — naive alternative, real reason, failure avoided |
 | B | [The Lab Book](appendix-b-lab-book.md) | Graded hands-on labs: diagnosis drills, reproduce-from-tests, extensions, comparative reading |
+| C | [Bug Hunts](appendix-c-bug-hunts.md) | Three real bugs from this codebase's history, hunted end to end — plus the symptom triage table |
 
 ## A note on how to read it
 

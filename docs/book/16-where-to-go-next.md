@@ -1,4 +1,4 @@
-# Chapter 15 — Where to Go Next
+# Chapter 16 — Where to Go Next
 
 You have followed the system from the firmware's first instruction to a
 crash-consistent filesystem holding the programs the kernel boots. That is a
@@ -9,7 +9,7 @@ how the concepts *connect* rather than as isolated exam answers. This final
 chapter is about turning that understanding into mastery: what to build next, and
 how to keep growing.
 
-## 15.1 The road this project is on
+## 16.1 The road this project is on
 
 The roadmap (README) runs to phase 10, and each remaining phase is a chance to
 learn a major subsystem:
@@ -44,7 +44,7 @@ why the PCI scan is written to extend to bridges, why UEFI and bare-metal driver
 today. Designing for a target you have not reached yet, at the interfaces rather
 than the implementations, is the through-line.
 
-## 15.2 How to actually get better at this
+## 16.2 How to actually get better at this
 
 Reading a system teaches you a lot; the next order of magnitude comes from
 *changing* one. [Appendix B](appendix-b-lab-book.md) turns everything below into
@@ -73,7 +73,7 @@ The short version, roughly in order:
    QEMU forgives, real firmware and real devices will not, and the gap *is* the
    curriculum.
 
-## 15.3 The habits that compound
+## 16.3 The habits that compound
 
 Strip away the specifics and the transferable lessons from every chapter collapse
 into a handful of habits. These are what to carry into any systems work, on any
@@ -99,7 +99,7 @@ codebase:
 - **Prove it every time, and never delete the proof.** Correctness is cumulative
   or it is temporary.
 
-## 15.4 A closing word
+## 16.4 A closing word
 
 The reason an operating system is the classic proving ground for a systems
 programmer is not that it is the hardest code to write line by line — plenty of
