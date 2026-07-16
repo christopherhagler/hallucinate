@@ -7,10 +7,12 @@
  * implementation of the on-disk layout.
  *
  *   graphfs_mkfs --out fs.img --size-mib 16 [--node-count 1024] \
+ *                [--dir /dev]... \
  *                /bin/init=build/user/init.elf /bin/hello=build/user/hello.elf
  *
  * Each DEST=SRC installs a host file at an absolute graphfs path, creating
- * intermediate namespaces (mkdir -p) as needed.
+ * intermediate namespaces (mkdir -p) as needed. Each --dir creates an empty
+ * namespace (mount points, like /dev, must exist on disk).
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -70,6 +72,33 @@ static uint64_t ensure_dir(struct gfs *fs, uint64_t dir, const char *name) {
         die("mkdir link", rc);
     }
     return id;
+}
+
+/* mkdir -p: create every component of an absolute path. */
+static void mkdirs(struct gfs *fs, const char *path) {
+    if (path[0] != '/') {
+        die("directory must be absolute", 0);
+    }
+    uint64_t dir = GFS_ROOT_NODE;
+    const char *p = path + 1;
+    char comp[GFS_NAME_MAX + 1];
+    while (*p != '\0') {
+        size_t n = 0;
+        while (p[n] != '\0' && p[n] != '/') {
+            n++;
+        }
+        if (n == 0 || n > GFS_NAME_MAX) {
+            die("bad path component", 0);
+        }
+        memcpy(comp, p, n);
+        comp[n] = '\0';
+        p += n;
+        while (*p == '/') {
+            p++;
+        }
+        dir = ensure_dir(fs, dir, comp);
+    }
+    printf("  %s (namespace)\n", path);
 }
 
 static void install(struct gfs *fs, const char *dest, const char *src) {
@@ -132,11 +161,15 @@ static void install(struct gfs *fs, const char *dest, const char *src) {
     free(buf);
 }
 
+#define MKFS_MAX_DIRS 16
+
 int main(int argc, char **argv) {
     const char *out = NULL;
     uint64_t size_mib = 16;
     uint64_t node_count = 1024;
     int first_install = 0;
+    const char *dirs[MKFS_MAX_DIRS];
+    int ndirs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
@@ -145,13 +178,20 @@ int main(int argc, char **argv) {
             size_mib = strtoull(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--node-count") == 0 && i + 1 < argc) {
             node_count = strtoull(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc) {
+            if (ndirs == MKFS_MAX_DIRS) {
+                die("too many --dir entries", 0);
+            }
+            dirs[ndirs++] = argv[++i];
         } else {
             first_install = i;
             break;
         }
     }
     if (!out) {
-        die("usage: graphfs_mkfs --out FILE --size-mib N [--node-count N] DEST=SRC...", 0);
+        die("usage: graphfs_mkfs --out FILE --size-mib N [--node-count N] "
+            "[--dir PATH]... DEST=SRC...",
+            0);
     }
 
     uint64_t nblk = size_mib * (1024 * 1024 / GFS_BLOCK_SIZE);
@@ -180,6 +220,9 @@ int main(int argc, char **argv) {
 
     printf("graphfs_mkfs: %s, %llu MiB (%llu blocks), %llu nodes\n", out,
            (unsigned long long)size_mib, (unsigned long long)nblk, (unsigned long long)node_count);
+    for (int i = 0; i < ndirs; i++) {
+        mkdirs(&fs, dirs[i]);
+    }
     if (first_install != 0) {
         for (int i = first_install; i < argc; i++) {
             char *eq = argv[i];

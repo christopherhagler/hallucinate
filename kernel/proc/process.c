@@ -37,6 +37,7 @@
 #include <string.h>
 #include <syscall.h>
 #include <uaccess.h>
+#include <vfs.h>
 #include <vmm.h>
 
 #define USER_STACK_TOP   0x00007FFFFFFFF000ull
@@ -46,25 +47,6 @@
 /* execve limits (per vector; also bounded by the stack page fit). */
 #define ARG_MAX_COUNT 16
 #define ARG_MAX_BYTES 128
-#define PATH_MAX_OURS 64
-
-/* Built-in program table: ELF images embedded in kernel .rodata by
- * kernel/user_blob.asm, the program source until the VFS (Phase 5). */
-extern const uint8_t user_init_blob[];
-extern const uint8_t user_init_blob_end[];
-extern const uint8_t user_hello_blob[];
-extern const uint8_t user_hello_blob_end[];
-
-struct boot_program {
-    const char *path;
-    const uint8_t *start;
-    const uint8_t *end;
-};
-
-static const struct boot_program programs[] = {
-    {"/bin/init", user_init_blob, user_init_blob_end},
-    {"/bin/hello", user_hello_blob, user_hello_blob_end},
-};
 
 /* Kernel-side per-process state, parallel to ptable.procs[]. */
 struct process {
@@ -72,26 +54,12 @@ struct process {
     struct thread *host;        /* kernel thread hosting ring 3 */
     struct thread *waiter;      /* thread of *this* process blocked in wait4 */
     struct syscall_frame start; /* user context for the first ring 3 entry */
+    struct file *fd[FD_MAX];    /* open files; NULL = free slot */
     char name[32];              /* program path, for thread naming */
 };
 
 static struct proc_table ptable;
 static struct process pstate[PROC_MAX];
-
-static const struct boot_program *prog_lookup(const char *path) {
-    for (unsigned i = 0; i < sizeof(programs) / sizeof(programs[0]); i++) {
-        if (strcmp(programs[i].path, path) == 0) {
-            return &programs[i];
-        }
-    }
-    return NULL;
-}
-
-/* Integer subtraction: the analyzer cannot see that the two linker
- * symbols delimit one object. */
-static uint64_t blob_size(const struct boot_program *prog) {
-    return (uint64_t)((uintptr_t)prog->end - (uintptr_t)prog->start);
-}
 
 static struct process *pstate_of(int pid) {
     struct proc_entry *e = proc_find(&ptable, pid);
@@ -172,21 +140,22 @@ static long stack_build(struct addrspace *as, const char *const argv[], int argc
 
 /*
  * Build a complete user image in a fresh address space: create it,
- * load the ELF, map the stack, lay out argv/envp, and fill `start`
- * with the entry context. On error the address space is destroyed
- * and -errno returned; nothing else is touched.
+ * load the ELF (`image`, `size` bytes of kernel memory), map the
+ * stack, lay out argv/envp, and fill `start` with the entry
+ * context. On error the address space is destroyed and -errno
+ * returned; nothing else is touched.
  */
-static long image_build(struct addrspace *as, const struct boot_program *prog,
+static long image_build(struct addrspace *as, const uint8_t *image, uint64_t size,
                         const char *const argv[], int argc, const char *const envp[], int envc,
                         struct syscall_frame *start) {
     if (vmm_addrspace_create_user(as) != 0) {
         return -ENOMEM;
     }
     uint64_t entry = 0;
-    int err = elf64_load(as, prog->start, blob_size(prog), &entry);
+    int err = elf64_load(as, image, size, &entry);
     if (err != ELF64_OK) {
         paging_user_destroy(as);
-        return (err == ELF64_ENOMEM) ? -ENOMEM : -ENOENT;
+        return (err == ELF64_ENOMEM) ? -ENOMEM : -ENOEXEC;
     }
     for (unsigned i = 1; i <= USER_STACK_PAGES; i++) {
         uint64_t frame = pmm_alloc_frame();
@@ -235,6 +204,50 @@ int process_getpid(void) {
     return thread_current()->pid;
 }
 
+/* ---- the per-process fd table ----
+ *
+ * Single CPU and no fd sharing between threads (one thread per
+ * process) make these plain array operations: nothing can race a
+ * table entry while its owner is inside a syscall. */
+
+struct file *process_file_get(int fd) {
+    int pid = thread_current()->pid;
+    if (pid == 0 || fd < 0 || fd >= FD_MAX) {
+        return NULL;
+    }
+    return pstate_of(pid)->fd[fd];
+}
+
+long process_fd_install(struct file *f) {
+    struct process *p = pstate_of(thread_current()->pid);
+    for (int i = 0; i < FD_MAX; i++) {
+        if (p->fd[i] == NULL) {
+            p->fd[i] = f;
+            return i;
+        }
+    }
+    return -EMFILE;
+}
+
+long process_fd_close(int fd) {
+    struct file *f = process_file_get(fd);
+    if (f == NULL) {
+        return -EBADF;
+    }
+    pstate_of(thread_current()->pid)->fd[fd] = NULL;
+    vfs_file_put(f);
+    return 0;
+}
+
+static void fd_table_close_all(struct process *p) {
+    for (int i = 0; i < FD_MAX; i++) {
+        if (p->fd[i] != NULL) {
+            vfs_file_put(p->fd[i]);
+            p->fd[i] = NULL;
+        }
+    }
+}
+
 /*
  * The one way out of a process: record the Linux wait status in the
  * table, wake a parent blocked in wait4, and end the hosting thread.
@@ -242,9 +255,12 @@ int process_getpid(void) {
  * vocabulary), decided by the caller.
  */
 static NORETURN void proc_die(int wstatus) {
-    uint64_t flags = cpu_irq_save();
     int pid = thread_current()->pid;
     KASSERT(pid > 0);
+    /* Release the process's files first (refcount drops; kfree is
+     * interrupt-safe, so the trap-path caller is fine too). */
+    fd_table_close_all(pstate_of(pid));
+    uint64_t flags = cpu_irq_save();
     int ppid = proc_exit(&ptable, pid, wstatus);
     if (ppid > 0) {
         struct proc_entry *parent = proc_find(&ptable, ppid);
@@ -298,6 +314,16 @@ long process_fork(const struct syscall_frame *parent_frame) {
         return -ENOMEM;
     }
 
+    /* Share the parent's open files: same descriptions, same
+     * offsets — the POSIX fork contract. */
+    struct process *pp = pstate_of(me->pid);
+    for (int i = 0; i < FD_MAX; i++) {
+        cp->fd[i] = pp->fd[i];
+        if (cp->fd[i] != NULL) {
+            vfs_file_ref(cp->fd[i]);
+        }
+    }
+
     /* The child is the parent at the syscall return point, but fork
      * returned 0 to it. */
     cp->start = *parent_frame;
@@ -349,7 +375,7 @@ static long argpack_copy(struct argpack *pack, uint64_t uvec) {
 /* Heap-held execve scratch: two argpacks are too big for a 16 KiB
  * kernel stack. */
 struct execve_args {
-    char path[PATH_MAX_OURS];
+    char path[VFS_PATH_MAX];
     struct argpack argv;
     struct argpack envp;
 };
@@ -368,11 +394,6 @@ long process_execve(struct syscall_frame *frame, uint64_t upath, uint64_t uargv,
         rc = (rc == -EFAULT) ? -EFAULT : -ENAMETOOLONG;
         goto out;
     }
-    const struct boot_program *prog = prog_lookup(xa->path);
-    if (prog == NULL) {
-        rc = -ENOENT;
-        goto out;
-    }
     rc = argpack_copy(&xa->argv, uargv);
     if (rc != 0) {
         goto out;
@@ -382,12 +403,20 @@ long process_execve(struct syscall_frame *frame, uint64_t upath, uint64_t uargv,
         goto out;
     }
 
-    /* Build the new image completely before touching the old one, so
-     * every failure leaves the caller exactly as it was. */
+    /* Pull the whole ELF off the disk, then build the new image
+     * completely before touching the old one, so every failure
+     * leaves the caller exactly as it was. */
+    void *image = NULL;
+    uint64_t size = 0;
+    rc = vfs_read_file(xa->path, &image, &size);
+    if (rc != 0) {
+        goto out;
+    }
     struct addrspace new_as;
     struct syscall_frame start;
-    rc = image_build(&new_as, prog, xa->argv.vec, xa->argv.count, xa->envp.vec, xa->envp.count,
-                     &start);
+    rc = image_build(&new_as, image, size, xa->argv.vec, xa->argv.count, xa->envp.vec,
+                     xa->envp.count, &start);
+    kfree(image);
     if (rc != 0) {
         goto out;
     }
@@ -401,10 +430,11 @@ long process_execve(struct syscall_frame *frame, uint64_t upath, uint64_t uargv,
     cpu_irq_restore(flags);
     paging_user_destroy(&old_as);
 
-    name_set(p->name, prog->path, sizeof(p->name));
+    name_set(p->name, xa->path, sizeof(p->name));
 
     /* "Return" into the fresh image: the sysret path restores this
-     * frame, landing at the ELF entry with a SysV argv stack. */
+     * frame, landing at the ELF entry with a SysV argv stack. The
+     * fd table deliberately survives (no close-on-exec flags yet). */
     *frame = start;
     rc = 0;
 
@@ -464,24 +494,43 @@ long process_wait4(int pid_arg, uint64_t uwstatus, int options, uint64_t urusage
 
 void process_run_init(void) {
     proc_table_init(&ptable);
-    const struct boot_program *prog = prog_lookup("/bin/init");
-    KASSERT(prog != NULL);
+    static const char *const INIT_PATH = "/bin/init";
 
     uint64_t frames_before = pmm_free_frames();
     int pid = proc_alloc(&ptable, 0);
     KASSERT(pid == PROC_INIT_PID);
     struct process *p = pstate_of(pid);
-    name_set(p->name, prog->path, sizeof(p->name));
+    name_set(p->name, INIT_PATH, sizeof(p->name));
     p->waiter = NULL;
 
-    const char *const argv[] = {prog->path, NULL};
-    long rc = image_build(&p->as, prog, argv, 1, NULL, 0, &p->start);
+    void *image = NULL;
+    uint64_t size = 0;
+    long rc = vfs_read_file(INIT_PATH, &image, &size);
+    if (rc != 0) {
+        panic("process: cannot read %s: %lld", INIT_PATH, (long long)rc);
+    }
+    const char *const argv[] = {INIT_PATH, NULL};
+    rc = image_build(&p->as, image, size, argv, 1, NULL, 0, &p->start);
+    kfree(image);
     if (rc != 0) {
         panic("process: cannot build init: %lld", (long long)rc);
     }
 
-    kprintf("user: launching init (embedded ELF, %llu bytes)\n",
-            (unsigned long long)blob_size(prog));
+    /* Init starts with the console on 0/1/2: one description, three
+     * references — exactly what a login shell would inherit. */
+    struct file *con = NULL;
+    rc = vfs_open("/dev/console", O_RDWR, &con);
+    if (rc != 0) {
+        panic("process: cannot open /dev/console: %lld", (long long)rc);
+    }
+    p->fd[0] = con;
+    vfs_file_ref(con);
+    p->fd[1] = con;
+    vfs_file_ref(con);
+    p->fd[2] = con;
+
+    kprintf("user: launching init (%s from disk, %llu bytes)\n", INIT_PATH,
+            (unsigned long long)size);
     host_launch(p, pid);
     thread_join(p->host);
 

@@ -6,16 +6,19 @@
  * syscalls/interrupts may run on this stack.
  *
  * Doubles as the acceptance test for the ELF64 loader, the syscall
- * ABI, and the process model: it deliberately places state in .text,
- * .rodata, .data, and .bss (PT_LOAD-covered sections with distinct
- * permissions) and verifies all of it, verifies every syscall result
- * the kernel can produce today, forks a child that execs /bin/hello
- * and reaps it, and proves fault isolation — children that touch
- * kernel memory or execute an illegal instruction die with the right
- * signal while everything else keeps running. The exit status is the
- * report: 0 means every check passed, any other value names the
- * first failed check. The kernel prints the status and the boot
- * integration test asserts on it.
+ * ABI, the process model, and the filesystem: it deliberately places
+ * state in .text, .rodata, .data, and .bss (PT_LOAD-covered sections
+ * with distinct permissions) and verifies all of it, verifies every
+ * syscall result the kernel can produce today, forks a child that
+ * execs /bin/hello and reaps it, proves fault isolation — children
+ * that touch kernel memory or execute an illegal instruction die
+ * with the right signal while everything else keeps running — and
+ * exercises the whole VFS read side (open/read/close/fstat/lseek/
+ * getdents64, devfs, path normalization) against the known contents
+ * of the boot filesystem image. The exit status is the report: 0
+ * means every check passed, any other value names the first failed
+ * check. The kernel prints the status and the boot integration test
+ * asserts on it.
  */
 #include <stdint.h>
 
@@ -149,6 +152,134 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     }
     if (sys_wait4(-1, &wstatus, 0) != pid || wstatus != 4 /* SIGILL */) {
         return 20;
+    }
+
+    /* --- the filesystem read side (slice 5c) --- */
+
+    /* fds 0/1/2 arrived from the kernel as the console: a character
+     * device, not a pipe-shaped placeholder. */
+    struct stat st;
+    if (sys_fstat(0, &st) != 0 || (st.st_mode & S_IFMT) != S_IFCHR) {
+        return 21;
+    }
+    /* Open a known file; the lowest free fd slot is 3. */
+    long fd = sys_open("/bin/hello", O_RDONLY);
+    if (fd != 3) {
+        return 22;
+    }
+    if (sys_fstat((int)fd, &st) != 0 || (st.st_mode & S_IFMT) != S_IFREG || st.st_size <= 0) {
+        return 23;
+    }
+    /* Its bytes are really /bin/hello's: an ELF magic first. */
+    char magic[4] = {0, 0, 0, 0};
+    if (sys_read((int)fd, magic, 4) != 4) {
+        return 24;
+    }
+    if (magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
+        return 25;
+    }
+    /* lseek: the end is st_size; rewinding rereads the magic. */
+    if (sys_lseek((int)fd, 0, SEEK_END) != st.st_size) {
+        return 26;
+    }
+    if (sys_lseek((int)fd, 0, SEEK_SET) != 0) {
+        return 27;
+    }
+    char byte0 = 0;
+    if (sys_read((int)fd, &byte0, 1) != 1 || byte0 != 0x7f) {
+        return 28;
+    }
+    /* A read-only fd rejects write; a file rejects getdents64. */
+    if (sys_write((int)fd, &byte0, 1) != -EBADF) {
+        return 29;
+    }
+    char dbuf[512];
+    if (sys_getdents64((int)fd, dbuf, sizeof(dbuf)) != -ENOTDIR) {
+        return 30;
+    }
+    /* close() releases the fd; the number is then dead. */
+    if (sys_close((int)fd) != 0) {
+        return 31;
+    }
+    if (sys_close((int)fd) != -EBADF) {
+        return 32;
+    }
+
+    /* Enumerate /bin: expect ".", "..", "init", "hello" and nothing
+     * else (the manifest is the Makefile's fs.img rule). */
+    long dfd = sys_open("/bin", O_RDONLY | O_DIRECTORY);
+    if (dfd < 0) {
+        return 33;
+    }
+    if (sys_read((int)dfd, dbuf, 1) != -EISDIR) {
+        return 34;
+    }
+    long dn = sys_getdents64((int)dfd, dbuf, sizeof(dbuf));
+    if (dn <= 0) {
+        return 35;
+    }
+    unsigned seen = 0; /* bit per expected entry */
+    for (long off = 0; off < dn;) {
+        const struct dirent64 *d = (const struct dirent64 *)(dbuf + off);
+        if (str_eq(d->d_name, ".") && d->d_type == DT_DIR) {
+            seen |= 1u;
+        } else if (str_eq(d->d_name, "..") && d->d_type == DT_DIR) {
+            seen |= 2u;
+        } else if (str_eq(d->d_name, "init") && d->d_type == DT_REG) {
+            seen |= 4u;
+        } else if (str_eq(d->d_name, "hello") && d->d_type == DT_REG) {
+            seen |= 8u;
+        } else {
+            seen |= 16u; /* an entry nobody installed */
+        }
+        off += d->d_reclen;
+    }
+    if (seen != 15u) {
+        return 36;
+    }
+    /* The cursor is at the end: the next call reports EOF. */
+    if (sys_getdents64((int)dfd, dbuf, sizeof(dbuf)) != 0) {
+        return 37;
+    }
+    if (sys_close((int)dfd) != 0) {
+        return 38;
+    }
+
+    /* Path resolution corner cases. */
+    if (sys_open("/bin/nonesuch", O_RDONLY) != -ENOENT) {
+        return 39;
+    }
+    if (sys_open("/bin/hello/sub", O_RDONLY) != -ENOTDIR) {
+        return 40;
+    }
+    if (sys_open("/bin/hello", O_RDONLY | O_DIRECTORY) != -ENOTDIR) {
+        return 41;
+    }
+    /* The mount is read-only until the 5d write path. */
+    if (sys_open("/bin/hello", O_WRONLY) != -EROFS) {
+        return 42;
+    }
+    /* "." and ".." normalize away (lexically, before resolution). */
+    fd = sys_open("/dev/../bin/./hello", O_RDONLY);
+    if (fd < 0) {
+        return 43;
+    }
+    sys_close((int)fd);
+
+    /* devfs: the console opens by path and is not seekable. */
+    fd = sys_open("/dev/console", O_RDWR);
+    if (fd < 0) {
+        return 44;
+    }
+    if (sys_lseek((int)fd, 0, SEEK_SET) != -ESPIPE) {
+        return 45;
+    }
+    static const char via[] = "user: console open via /dev/console ok\n";
+    if (sys_write((int)fd, via, str_len(via)) != (long)str_len(via)) {
+        return 46;
+    }
+    if (sys_close((int)fd) != 0) {
+        return 47;
     }
 
     /* Patch the report in .data before printing it: proves the

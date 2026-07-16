@@ -10,6 +10,7 @@
  */
 #include <keyboard.h>
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <arch/x86_64/cpu.h>
@@ -30,6 +31,8 @@ static char ring[RING_SIZE];
 static uint32_t ring_head; /* next write */
 static uint32_t ring_tail; /* next read */
 
+static void (*notify)(void); /* new-input callback (IRQ context) */
+
 static void ring_push(char c) {
     uint32_t next = (ring_head + 1) % RING_SIZE;
     if (next == ring_tail) {
@@ -40,12 +43,17 @@ static void ring_push(char c) {
 }
 
 static void keyboard_irq(void) {
+    int pushed = 0;
     while (inb(KBD_STATUS) & STATUS_OBF) {
         uint8_t sc = inb(KBD_DATA);
         int c = kbd_map_feed(&state, sc);
         if (c > 0) {
             ring_push((char)c);
+            pushed = 1;
         }
+    }
+    if (pushed && notify != NULL) {
+        notify();
     }
 }
 
@@ -55,6 +63,10 @@ void keyboard_init(void) {
         (void)inb(KBD_DATA);
     }
     irq_register(IRQ_KEYBOARD, keyboard_irq);
+}
+
+void keyboard_set_notify(void (*fn)(void)) {
+    notify = fn;
 }
 
 int keyboard_getchar(void) {

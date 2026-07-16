@@ -2,7 +2,7 @@
  * main.c - kernel C entry point.
  *
  * Entered from arch/x86_64/entry.asm with the physical address of the
- * bootinfo block (see docs/boot-protocol.md) as the only argument.
+ * bootinfo block (see docs/book/appendix-e-boot-protocol.md) as the only argument.
  */
 #include <stdint.h>
 
@@ -28,6 +28,7 @@
 #include <selftest.h>
 #include <syscall.h>
 #include <timer.h>
+#include <vfs.h>
 #include <virtio_blk.h>
 #include <vmm.h>
 
@@ -121,6 +122,7 @@ void kmain(uint64_t bootinfo_phys) {
     pci_init();
     virtio_blk_init();
     block_selftest();
+    vfs_init();
 
     selftest_run();
 

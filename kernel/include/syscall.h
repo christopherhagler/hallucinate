@@ -1,7 +1,7 @@
 /*
  * syscall.h - the native system call interface.
  *
- * ABI (identical to Linux x86_64 by design — see docs/userspace.md):
+ * ABI (identical to Linux x86_64 by design — see docs/book/appendix-h-userspace.md):
  *   entry        `syscall` instruction
  *   number       rax
  *   arguments    rdi, rsi, rdx, r10, r8, r9
@@ -16,12 +16,18 @@
 
 #include <stdint.h>
 
-#define SYS_write  1
-#define SYS_getpid 39
-#define SYS_fork   57
-#define SYS_execve 59
-#define SYS_exit   60
-#define SYS_wait4  61
+#define SYS_read       0
+#define SYS_write      1
+#define SYS_open       2
+#define SYS_close      3
+#define SYS_fstat      5
+#define SYS_lseek      8
+#define SYS_getpid     39
+#define SYS_fork       57
+#define SYS_execve     59
+#define SYS_exit       60
+#define SYS_wait4      61
+#define SYS_getdents64 217
 
 /*
  * The complete user register state at syscall entry, built on the

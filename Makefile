@@ -84,13 +84,6 @@ $(BUILD)/user/init.elf: $(BUILD)/user/crt0.o $(BUILD)/user/init.o user/user.ld
 $(BUILD)/user/hello.elf: $(BUILD)/user/crt0.o $(BUILD)/user/hello.o user/user.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/hello.o
 
-# The program images are embedded in kernel .rodata; the explicit
-# rule overrides the kernel pattern rule so the object also depends
-# on the images it incbins.
-$(BUILD)/kernel/user_blob.o: kernel/user_blob.asm $(USER_ELFS)
-	@mkdir -p $(dir $@)
-	$(NASM) -f elf64 -g -F dwarf -i $(BUILD)/user/ $< -o $@
-
 $(BUILD)/kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 	$(LD) -T kernel/linker.ld -nostdlib -static -z max-page-size=0x1000 \
 	    -o $@ $(KERNEL_OBJS)
@@ -129,11 +122,12 @@ $(BUILD)/graphfs_fsck: tools/graphfs_fsck.c $(GFS_CORE_SRCS)
 	$(CC) $(GFS_TOOL_CFLAGS) $^ -o $@
 
 # The filesystem disk, attached as a modern virtio-blk device (the boot disk
-# stays on the BIOS/INT13 path). Built by graphfs_mkfs, which installs the
-# userspace programs at /bin so the kernel can load them from disk (5c).
+# stays on the BIOS/INT13 path). Built by graphfs_mkfs: the userspace
+# programs land at /bin (init loads from here — there are no embedded
+# program blobs), and /dev exists as the devfs mount point.
 FS_IMG_MIB := 16
 $(BUILD)/fs.img: $(BUILD)/graphfs_mkfs $(USER_ELFS)
-	$(BUILD)/graphfs_mkfs --out $@ --size-mib $(FS_IMG_MIB) \
+	$(BUILD)/graphfs_mkfs --out $@ --size-mib $(FS_IMG_MIB) --dir /dev \
 	    /bin/init=$(BUILD)/user/init.elf /bin/hello=$(BUILD)/user/hello.elf
 
 QEMU_FLAGS := -m 256M -drive file=$(BUILD)/disk.img,format=raw \
@@ -164,10 +158,11 @@ HOST_TEST_SRCS := tests/host/test_main.c tests/host/test_string.c \
     tests/host/test_fmt.c tests/host/test_kbd.c tests/host/test_pmm.c \
     tests/host/test_heap.c tests/host/test_sched.c tests/host/test_elf64.c \
     tests/host/test_proc.c tests/host/test_virtq.c tests/host/test_graphfs.c \
+    tests/host/test_vfs_path.c \
     kernel/lib/string.c kernel/lib/fmt.c kernel/drivers/kbd_map.c \
     kernel/mm/pmm_core.c kernel/mm/heap_core.c kernel/sched/sched_core.c \
     kernel/lib/elf64.c kernel/proc/proc_core.c kernel/drivers/virtq_core.c \
-    kernel/lib/crc32c.c kernel/fs/graphfs_core.c
+    kernel/lib/crc32c.c kernel/fs/graphfs_core.c kernel/fs/vfs_path.c
 
 $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
                      kernel/include/string.h kernel/include/fmt.h \
@@ -175,7 +170,8 @@ $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
                      kernel/include/heap_core.h kernel/include/sched_core.h \
                      kernel/include/thread.h kernel/include/elf64.h \
                      kernel/include/proc_core.h kernel/include/virtq_core.h \
-                     kernel/include/crc32c.h kernel/include/graphfs_core.h
+                     kernel/include/crc32c.h kernel/include/graphfs_core.h \
+                     kernel/include/vfs.h kernel/include/stat.h
 	@mkdir -p $(BUILD)
 	$(CC) $(HOST_CFLAGS) $(HOST_TEST_SRCS) -o $@
 

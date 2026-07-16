@@ -1,19 +1,26 @@
 /*
- * syscall.c - system call dispatch and the small implementations.
+ * syscall.c - system call dispatch and the file syscalls.
  *
- * ABI in syscall.h. User pointers go through uaccess.h validation;
- * the process-model syscalls (fork/execve/wait4/exit) live in
- * process.c and get the syscall frame where they need the full user
- * context.
+ * ABI in syscall.h. This layer owns user-pointer validation (a
+ * validated range is a plain pointer below, because the caller's
+ * address space is active for the whole syscall) and the fd-number →
+ * struct file step; the semantics live in the VFS file ops. The
+ * process-model syscalls (fork/execve/wait4/exit) live in process.c
+ * and get the syscall frame where they need the full user context.
+ *
+ * A NULL file-op slot maps to the conventional errno per operation:
+ * read -EINVAL, write -EBADF (read-only open), lseek -ESPIPE,
+ * getdents64 -ENOTDIR.
  */
 #include <syscall.h>
 
 #include <stddef.h>
 
-#include <console.h>
 #include <errno.h>
 #include <process.h>
+#include <stat.h>
 #include <uaccess.h>
+#include <vfs.h>
 
 #define ERR(e) ((uint64_t)-(e))
 
@@ -27,10 +34,26 @@ _Static_assert(offsetof(struct syscall_frame, rflags) == 13ull * 8, "layout");
 _Static_assert(offsetof(struct syscall_frame, rip) == 14ull * 8, "layout");
 _Static_assert(offsetof(struct syscall_frame, rsp) == 15ull * 8, "rsp pushed first");
 
-/* write(fd, buf, count): fd 1 (stdout) and 2 (stderr) both reach the
- * kernel console until file descriptors exist (Phase 5). */
+static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count) {
+    struct file *f = process_file_get((int)fd);
+    if (f == NULL) {
+        return ERR(EBADF);
+    }
+    if (f->ops->read == NULL) {
+        return ERR(EINVAL);
+    }
+    if (count == 0) {
+        return 0;
+    }
+    if (!user_range_ok(buf, count, 1)) {
+        return ERR(EFAULT);
+    }
+    return (uint64_t)f->ops->read(f, (void *)buf, count);
+}
+
 static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count) {
-    if (fd != 1 && fd != 2) {
+    struct file *f = process_file_get((int)fd);
+    if (f == NULL || f->ops->write == NULL) {
         return ERR(EBADF);
     }
     if (count == 0) {
@@ -39,14 +62,92 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count) {
     if (!user_range_ok(buf, count, 0)) {
         return ERR(EFAULT);
     }
-    console_write((const char *)buf, count);
-    return count;
+    return (uint64_t)f->ops->write(f, (const void *)buf, count);
+}
+
+static uint64_t sys_open(uint64_t upath, uint64_t flags, uint64_t mode) {
+    (void)mode; /* meaningful with O_CREAT, which needs the 5d write path */
+    char path[VFS_PATH_MAX];
+    long rc = user_strncpy(path, upath, sizeof(path));
+    if (rc < 0) {
+        return (uint64_t)rc;
+    }
+    struct file *f = NULL;
+    rc = vfs_open(path, (int)flags, &f);
+    if (rc != 0) {
+        return (uint64_t)rc;
+    }
+    rc = process_fd_install(f);
+    if (rc < 0) {
+        vfs_file_put(f);
+    }
+    return (uint64_t)rc;
+}
+
+static uint64_t sys_close(uint64_t fd) {
+    return (uint64_t)process_fd_close((int)fd);
+}
+
+static uint64_t sys_fstat(uint64_t fd, uint64_t ustat) {
+    struct file *f = process_file_get((int)fd);
+    if (f == NULL) {
+        return ERR(EBADF);
+    }
+    struct stat st;
+    long rc = f->ops->fstat(f, &st);
+    if (rc != 0) {
+        return (uint64_t)rc;
+    }
+    if (user_copy_to(ustat, &st, sizeof(st)) != 0) {
+        return ERR(EFAULT);
+    }
+    return 0;
+}
+
+static uint64_t sys_lseek(uint64_t fd, uint64_t off, uint64_t whence) {
+    struct file *f = process_file_get((int)fd);
+    if (f == NULL) {
+        return ERR(EBADF);
+    }
+    if (f->ops->lseek == NULL) {
+        return ERR(ESPIPE);
+    }
+    return (uint64_t)f->ops->lseek(f, (int64_t)off, (int)whence);
+}
+
+static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count) {
+    struct file *f = process_file_get((int)fd);
+    if (f == NULL) {
+        return ERR(EBADF);
+    }
+    if (f->ops->getdents == NULL) {
+        return ERR(ENOTDIR);
+    }
+    if (!user_range_ok(dirp, count, 1)) {
+        return ERR(EFAULT);
+    }
+    return (uint64_t)f->ops->getdents(f, (void *)dirp, count);
 }
 
 void syscall_dispatch(struct syscall_frame *frame) {
     switch (frame->rax) {
+    case SYS_read:
+        frame->rax = sys_read(frame->rdi, frame->rsi, frame->rdx);
+        return;
     case SYS_write:
         frame->rax = sys_write(frame->rdi, frame->rsi, frame->rdx);
+        return;
+    case SYS_open:
+        frame->rax = sys_open(frame->rdi, frame->rsi, frame->rdx);
+        return;
+    case SYS_close:
+        frame->rax = sys_close(frame->rdi);
+        return;
+    case SYS_fstat:
+        frame->rax = sys_fstat(frame->rdi, frame->rsi);
+        return;
+    case SYS_lseek:
+        frame->rax = sys_lseek(frame->rdi, frame->rsi, frame->rdx);
         return;
     case SYS_getpid:
         frame->rax = (uint64_t)process_getpid();
@@ -60,6 +161,9 @@ void syscall_dispatch(struct syscall_frame *frame) {
     case SYS_wait4:
         frame->rax =
             (uint64_t)process_wait4((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10);
+        return;
+    case SYS_getdents64:
+        frame->rax = sys_getdents64(frame->rdi, frame->rsi, frame->rdx);
         return;
     case SYS_exit:
         process_exit((int)frame->rdi);

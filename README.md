@@ -28,8 +28,10 @@ Two questions drive the project:
 
 ## Current status
 
-**Phase 5 underway: the kernel has a disk — PCI enumeration, a VIRTIO 1.2 virtio-blk
-driver, and a cached block layer. Next: graphfs, our native graph filesystem.**
+**Phase 5 underway: the kernel has a disk and a filesystem on it — graphfs, our
+from-scratch property-graph filesystem, mounted at `/` through a VFS with devfs at
+`/dev`. Nothing userspace runs is embedded anymore: init loads off the disk. Next:
+the write path.**
 
 Phase 4 delivered a real process model — fork, execve, wait — running in ring 3 with full
 fault isolation.
@@ -51,26 +53,41 @@ stack), and init reaps it with wait4** — the boot below shows both programs pr
 from ring 3. A faulting process dies alone: a hardware exception in ring 3 kills that
 process with the matching Linux signal (`SIGSEGV`, `SIGILL`, ...), reported to the parent
 through wait4, while the kernel and every other process keep running — the boot below
-shows two deliberately crashed children being reaped. Init's exit status 0 asserts twenty
-checks: segment integrity, register preservation across syscalls, every error path
-(`-ENOSYS`/`-EBADF`/`-EFAULT`/`-ECHILD`/`-ENOENT`), the fork/exec/wait round trip, and
-fault isolation itself.
+shows two deliberately crashed children being reaped. Init's exit status 0 asserts
+forty-seven checks: segment integrity, register preservation across syscalls, every
+error path, the fork/exec/wait round trip, fault isolation itself, and the whole file
+surface below.
 
-Phase 5 has begun on the storage stack: the kernel scans the PCI bus, drives a **modern
-virtio-blk device implemented against the VIRTIO 1.2 specification** (capability-based
-transport, split virtqueues with host-tested ring bookkeeping), and reads and writes the
-disk through a write-through block cache — proven at every boot by a write/readback/
-restore self-test against the real device. The filesystem it will carry is not ext2 but
-**graphfs, a from-scratch property-graph filesystem**: files as nodes, typed named edges
-as the structure, the POSIX tree as just one subgraph — the foundation for the AI-native
-semantic layer in Phase 6.
+Phase 5's storage stack is real end to end. The kernel scans the PCI bus, drives a
+**modern virtio-blk device implemented against the VIRTIO 1.2 specification**
+(capability-based transport, split virtqueues with host-tested ring bookkeeping), and
+reads the disk through a write-through block cache — proven at every boot by a
+write/readback/restore self-test against the real device. On it lives not ext2 but
+**graphfs, a from-scratch property-graph filesystem**: files as nodes, typed named
+edges as the structure, the POSIX tree as just one subgraph — the foundation for the
+AI-native semantic layer in Phase 6. On disk it is copy-on-write and self-checksumming
+(crc32c carried in every pointer to a metadata block), so the image is consistent at
+every instant — no journal, no fsck-on-boot — and the format engine is one pure C
+module shared verbatim by the kernel, the `graphfs_mkfs` image builder, and the
+`graphfs_fsck` checker that gates `make check`.
+
+Above it, a **VFS** owns the namespace: compile-time mounts (graphfs read-only at `/`,
+devfs at `/dev`), an ops-vtable open-file layer with POSIX description sharing across
+fork, per-process fd tables, lexical path normalization (pure, host-tested), and the
+kernel's first sleeping lock serializing the disk. The file syscalls — `read`, `open`,
+`close`, `fstat`, `lseek`, `getdents64`, real fds for `write` — keep the Linux x86_64
+ABI bit-for-bit (144-byte `struct stat`, real `linux_dirent64` records). `/dev/console`
+blocks on the keyboard for input, init starts with fds 0/1/2 on it, and **execve loads
+ELFs through the VFS**: the embedded-blob scaffold from Phase 4 is deleted, and the
+boot proves init came off the graphfs image.
 
 ```
 Hallucinate OS v0.5.0 (x86_64)
 cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked
+boot: BIOS drive 0x80, boot protocol v1
 e820: 7 entries
 memory: 255 MiB usable
-pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x121000
+pmm: 255 MiB managed, 254 MiB free, bitmap 7 KiB at 0x124000
 vmm: kernel page tables active, 4096 MiB direct-mapped at 0xffff800000000000
 heap: slab allocator ready
 sched: online, round-robin, 10 ms timeslice
@@ -87,15 +104,18 @@ pci: 7 functions
 virtio-blk: 16 MiB (32768 sectors), queue size 128
 block: virtio-blk, 16 MiB (4096 blocks of 4096), cache 256 KiB
 block: selftest passed (write/readback/restore)
+vfs: graphfs root mounted ro (gen 11, 4081/4096 blocks free, 1018/1024 nodes free)
+vfs: devfs at /dev (console)
 selftest: sched interleave "abcabcabcabc"
 selftest: passed (701 assertions)
-user: launching init (embedded ELF, 13416 bytes)
+user: launching init (/bin/init from disk, 13448 bytes)
 hello from ring 3
 hello from execve
-trap: user fault: #PF page fault at rip=0x400444 (error 0x6, cr2=0xffffffff80000000)
+trap: user fault: #PF page fault at rip=0x400944 (error 0x6, cr2=0xffffffff80000000)
 user: pid 3 (/bin/init) killed by signal 11
-trap: user fault: #UD invalid opcode at rip=0x400434 (error 0)
+trap: user fault: #UD invalid opcode at rip=0x400934 (error 0)
 user: pid 4 (/bin/init) killed by signal 4
+user: console open via /dev/console ok
 user: C init: .data .bss .rodata ok
 user: init exited (status 0)
 boot: complete
@@ -135,10 +155,12 @@ make check    # run all test suites
 
 `make check` must pass before every commit. It runs:
 
-- **Host unit tests** — the kernel's freestanding library (string, printf) compiled for
-  macOS and run under AddressSanitizer/UBSan.
+- **Host unit tests** — the kernel's pure cores (freestanding library, allocators,
+  scheduler policy, keyboard translation, ELF validator, virtqueue bookkeeping, graphfs,
+  path normalization) compiled for macOS and run under AddressSanitizer/UBSan.
 - **Boot integration test** — a headless QEMU boot of the real disk image, asserting that
   the expected markers appear on the serial console in order and that no panic occurs.
+- **Filesystem check** — `graphfs_fsck` verifies every invariant of the built `fs.img`.
 
 A third level, in-kernel self-tests, runs on every boot and is asserted by the integration
 test.
@@ -147,9 +169,9 @@ test.
 
 ```
 boot/        stage1.asm (MBR), stage2.asm (A20, E820, long mode, ELF loader)
-kernel/      the kernel: arch/x86_64/, drivers/, block/, mm/, sched/, proc/, lib/, and core
-user/        userspace: init.c, crt0.asm, syscall wrappers, linker script
-tools/       mkimage.py — assembles and validates the disk image
+kernel/      the kernel: arch/x86_64/, drivers/, block/, fs/, mm/, sched/, proc/, lib/, and core
+user/        userspace: init.c, hello.c, crt0.asm, syscall wrappers, linker script
+tools/       mkimage.py (boot disk), graphfs_mkfs.c (fs.img), graphfs_fsck.c (checker)
 tests/       host unit tests and the QEMU boot harness
 ```
 

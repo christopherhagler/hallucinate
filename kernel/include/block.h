@@ -6,11 +6,12 @@
  * access goes through block_read/block_write, which maintain a small
  * write-through cache of recently used blocks.
  *
- * v1 concurrency contract: one caller at a time. I/O is synchronous
- * and can take milliseconds, so callers must NOT hold interrupts off;
- * the layer asserts against reentry. A sleeping lock replaces this
- * contract when the VFS lets multiple processes reach the disk
- * (Phase 5c).
+ * Concurrency contract: one caller at a time, asserted against
+ * reentry. I/O is synchronous and can take milliseconds, so callers
+ * must NOT hold interrupts off. The contract is discharged by the
+ * VFS: every runtime disk path goes through vfs.c, which serializes
+ * behind one sleeping mutex; boot-time callers (block_selftest, the
+ * mount) run before userspace exists.
  */
 #pragma once
 
