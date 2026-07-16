@@ -5,7 +5,7 @@ builder, because the difference between the two is repetitions: hours spent
 changing a kernel, breaking it, watching it fail, and fixing it with the
 instruments from Chapter 0. Every lab below is concrete, runs against this
 repository, and ends with a verification step — because "done" here means the
-machine demonstrates it (Chapter 14), including for your homework.
+machine demonstrates it (Chapter 15), including for your homework.
 
 **Difficulty grades:**
 
@@ -100,7 +100,7 @@ you haven't learned yet (chase it — Appendix A style).
 
 Each of these adds something real. The deliverable is not just the feature: it's
 the feature **plus** its host tests, its boot marker or selftest, and its docs
-paragraph — the full Chapter 14 definition of done.
+paragraph — the full Chapter 15 definition of done.
 
 1. ★★ **A new syscall: `uname` (63)** — return a hardcoded
    `struct utsname` through a validated user pointer. Small, but it walks the

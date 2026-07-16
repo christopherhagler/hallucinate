@@ -73,12 +73,22 @@ Two structural decisions shape almost every chapter, so learn them now:
 | 11 | [ELF Loading and Processes](11-processes.md) | fork, execve, wait4, exit, and killing a process without killing the kernel |
 | 12 | [Storage: PCI, virtio, and the Block Layer](12-storage.md) | Enumerating a bus, driving a paravirtual device, caching blocks |
 | 13 | [graphfs: A Filesystem From First Principles](13-graphfs.md) | Copy-on-write, self-checksumming, and designing an on-disk format |
-| 14 | [Testing and Professional Discipline](14-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
-| 15 | [How an OS Actually Gets Built](15-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
-| 16 | [Where to Go Next](16-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
+| 14 | [The VFS: One Namespace Over Many Filesystems](14-vfs.md) | Open files, fd tables, devfs, the kernel's first sleeping lock, and exec from disk |
+| 15 | [Testing and Professional Discipline](15-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
+| 16 | [How an OS Actually Gets Built](16-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
+| 17 | [Where to Go Next](17-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
 | A | [The Folklore Margin](appendix-a-folklore.md) | The tacit *whys* behind the code's decisions — naive alternative, real reason, failure avoided |
 | B | [The Lab Book](appendix-b-lab-book.md) | Graded hands-on labs: diagnosis drills, reproduce-from-tests, extensions, comparative reading |
 | C | [Bug Hunts](appendix-c-bug-hunts.md) | Three real bugs from this codebase's history, hunted end to end — plus the symptom triage table |
+| D | [Architecture Overview](appendix-d-architecture.md) | The system as it exists today: source tree, boot flow, bring-up sequence |
+| E | [Boot Protocol](appendix-e-boot-protocol.md) | The versioned bootloader ↔ kernel contract |
+| F | [Memory Map](appendix-f-memory-map.md) | Physical and virtual address space layout |
+| G | [Scheduling](appendix-g-scheduling.md) | Threads, context switch, preemption — design and invariants |
+| H | [Userspace and System Calls](appendix-h-userspace.md) | The syscall ABI, ELF loading, the process model, fd tables |
+| I | [Storage](appendix-i-storage.md) | PCI, virtio-blk, and the block layer |
+| J | [The VFS](appendix-j-vfs.md) | Mounts, open files, path normalization, devfs, locking |
+| K | [graphfs](appendix-k-graphfs.md) | The native filesystem's authoritative on-disk format |
+| L | [Testing](appendix-l-testing.md) | The three-level test strategy behind `make check` |
 
 ## A note on how to read it
 

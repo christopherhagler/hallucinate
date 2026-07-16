@@ -8,7 +8,7 @@
  * (TAG, REF) share the same storage and become the Phase 6 AI-native
  * substrate — provenance, semantic links — with no format change.
  *
- * ---- Modern on-disk design (v1; docs/graphfs.md is authoritative) ----
+ * ---- Modern on-disk design (v1; docs/book/appendix-k-graphfs.md is authoritative) ----
  *
  * graphfs is copy-on-write and self-checksumming, in the ZFS/APFS mould:
  *

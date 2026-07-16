@@ -5,7 +5,7 @@
  * core that manipulates these structures is unit-tested on the host
  * (tests/host/test_sched.c). The arch-specific parts — the saved
  * stack pointer contract and the initial stack frame — are documented
- * in docs/scheduling.md and implemented in kernel/sched/ and
+ * in docs/book/appendix-g-scheduling.md and implemented in kernel/sched/ and
  * kernel/arch/x86_64/ctx.asm.
  */
 #pragma once

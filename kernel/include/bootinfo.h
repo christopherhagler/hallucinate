@@ -3,7 +3,7 @@
  *
  * Stage 2 fills a `struct bootinfo` at physical BOOTINFO_PHYS and enters the
  * kernel with RDI holding that physical address. Any change here is a boot
- * protocol change: bump BOOTINFO_VERSION and update docs/boot-protocol.md
+ * protocol change: bump BOOTINFO_VERSION and update docs/book/appendix-e-boot-protocol.md
  * and boot/stage2.asm together.
  */
 #ifndef HL_BOOTINFO_H

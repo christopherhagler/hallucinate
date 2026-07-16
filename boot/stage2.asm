@@ -14,9 +14,9 @@
 ;      0xffffffff80000000, using 2 MiB pages.
 ;   5. Enable long mode, parse the staged ELF64, copy PT_LOAD segments to
 ;      their physical load addresses, and jump to the entry point with
-;      RDI = physical address of bootinfo (see docs/boot-protocol.md).
+;      RDI = physical address of bootinfo (see docs/book/appendix-e-boot-protocol.md).
 ;
-; Boot-time physical memory layout (see docs/boot-protocol.md):
+; Boot-time physical memory layout (see docs/book/appendix-e-boot-protocol.md):
 ;   0x00500          A20 wraparound test scratch byte
 ;   0x06000          bootinfo block (magic, e820 map, ...)
 ;   0x07C00          stage 1 + stack (grows down from 0x7C00)

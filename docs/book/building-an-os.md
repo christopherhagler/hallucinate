@@ -79,12 +79,22 @@ Two structural decisions shape almost every chapter, so learn them now:
 | 11 | [ELF Loading and Processes](11-processes.md) | fork, execve, wait4, exit, and killing a process without killing the kernel |
 | 12 | [Storage: PCI, virtio, and the Block Layer](12-storage.md) | Enumerating a bus, driving a paravirtual device, caching blocks |
 | 13 | [graphfs: A Filesystem From First Principles](13-graphfs.md) | Copy-on-write, self-checksumming, and designing an on-disk format |
-| 14 | [Testing and Professional Discipline](14-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
-| 15 | [How an OS Actually Gets Built](15-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
-| 16 | [Where to Go Next](16-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
+| 14 | [The VFS: One Namespace Over Many Filesystems](14-vfs.md) | Open files, fd tables, devfs, the kernel's first sleeping lock, and exec from disk |
+| 15 | [Testing and Professional Discipline](15-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
+| 16 | [How an OS Actually Gets Built](16-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
+| 17 | [Where to Go Next](17-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
 | A | [The Folklore Margin](appendix-a-folklore.md) | The tacit *whys* behind the code's decisions — naive alternative, real reason, failure avoided |
 | B | [The Lab Book](appendix-b-lab-book.md) | Graded hands-on labs: diagnosis drills, reproduce-from-tests, extensions, comparative reading |
 | C | [Bug Hunts](appendix-c-bug-hunts.md) | Three real bugs from this codebase's history, hunted end to end — plus the symptom triage table |
+| D | [Architecture Overview](appendix-d-architecture.md) | The system as it exists today: source tree, boot flow, bring-up sequence |
+| E | [Boot Protocol](appendix-e-boot-protocol.md) | The versioned bootloader ↔ kernel contract |
+| F | [Memory Map](appendix-f-memory-map.md) | Physical and virtual address space layout |
+| G | [Scheduling](appendix-g-scheduling.md) | Threads, context switch, preemption — design and invariants |
+| H | [Userspace and System Calls](appendix-h-userspace.md) | The syscall ABI, ELF loading, the process model, fd tables |
+| I | [Storage](appendix-i-storage.md) | PCI, virtio-blk, and the block layer |
+| J | [The VFS](appendix-j-vfs.md) | Mounts, open files, path normalization, devfs, locking |
+| K | [graphfs](appendix-k-graphfs.md) | The native filesystem's authoritative on-disk format |
+| L | [Testing](appendix-l-testing.md) | The three-level test strategy behind `make check` |
 
 ## A note on how to read it
 
@@ -153,7 +163,7 @@ What each is for, mapped to what you have already read:
 - **clang** (Xcode CLT) — the C compiler. Clang is a cross-compiler natively;
   `--target=x86_64-elf` is all it takes to emit bare-metal x86-64 (Chapter 2).
   It also compiles the *pure cores* a second time, for your Mac, under sanitizers
-  (Chapter 14).
+  (Chapter 15).
 - **nasm** — assembles the bootloader (flat binary, `-f bin`) and the kernel/user
   assembly stubs (`-f elf64`).
 - **lld** (`ld.lld`) — the linker. Applies the higher-half linker script
@@ -274,7 +284,7 @@ make run        # boot it in QEMU with a window + serial on stdio
 make check      # the gate: host sanitizer tests + boot integration + fsck
 ```
 
-`make check` is the one you run constantly (Chapter 14). It is fast, and green-
+`make check` is the one you run constantly (Chapter 15). It is fast, and green-
 before-commit is the law. `make run` boots the real image interactively so you can
 watch the serial log and type at the keyboard echo loop. When you are working on a
 pure core, the tightest loop is even smaller — build and run just the host tests:
@@ -306,7 +316,7 @@ is *loud* (`panic` prints `PANIC: file:line: message`; the bootloader prints
 `ERR:`), and the panic path dumps registers. When the machine dies, read the panic
 line first — it usually names the file and the reason.
 
-Remember the diagnostic corollary from Chapter 14: because every fatal path is
+Remember the diagnostic corollary from Chapter 15: because every fatal path is
 loud, **a silent hang means something wedged before reaching a known failure
 point** — often an early spin loop, a fault before the IDT is installed, or a
 deadlock with interrupts off. Silence is itself a clue about *where* to look.
@@ -392,7 +402,7 @@ Put the instruments together into a way of working:
 1. **Read a chapter, then read its code** with the repo open, setting a gdb
    breakpoint in the function it describes and watching it run. Concept, then
    code, then *observed behavior* — all three, or it will not stick.
-2. **Reproduce a subsystem from its tests** (Chapter 16 §2): blank the body of
+2. **Reproduce a subsystem from its tests** (Chapter 17 §2): blank the body of
    `pmm_core.c` or `sched_core.c`, keep the header and host tests, and reimplement
    until `make check-host` is green. The tests are a specification; passing them
    from scratch is how you learn which invariants are load-bearing.
@@ -488,7 +498,7 @@ pure function of its inputs and push the hardware to the edges.
 
 ## 1.3 Complete or absent
 
-This codebase has a rule, stated in `docs/architecture.md` as a design
+This codebase has a rule, stated in Appendix D as a design
 principle: *"Features are fully implemented within their documented scope or not
 merged. Unsupported operations fail explicitly."*
 
@@ -508,7 +518,7 @@ that is how you get corruption. The habit to build:
   in-bounds and overflow-free.
 
 The corollary is that *documented limits are a feature*, not an admission of
-failure. `docs/userspace.md` has a whole "Known limits of this slice" section:
+failure. Appendix H has a whole "Known limits of this slice" section:
 eager fork with no copy-on-write, no `WNOHANG`, no FPU save, static `ET_EXEC`
 only. Each is a deliberate, bounded scope with an explicit failure for anything
 outside it. That is what "professional" means in kernel work — not that
@@ -519,7 +529,7 @@ enforced by the code.
 
 Concurrency and hardware make kernel state fragile. The defense is to keep, for
 each subsystem, a short list of invariants so simple you can check them by
-inspection. The scheduler's list (`docs/scheduling.md`) is the model:
+inspection. The scheduler's list (Appendix G) is the model:
 
 1. `schedule()` is entered with interrupts disabled — always (and it asserts
    this).
@@ -559,7 +569,7 @@ nobody reads.
 ## 1.6 Make the machine prove it works, every time
 
 Nothing in this project is "tested by me running it once." Three levels of
-automated checking accumulate for the life of the codebase (Chapter 14 is the
+automated checking accumulate for the life of the codebase (Chapter 15 is the
 full treatment):
 
 - **Host unit tests** under ASan/UBSan for the pure cores.
@@ -632,7 +642,7 @@ metal:
 - **`--target=x86_64-elf`** — cross-compile for a bare x86_64 ELF target rather
   than macOS Mach-O. Clang is a cross-compiler out of the box; on Apple Silicon
   you are compiling for an architecture your build machine cannot even execute
-  natively, which is exactly why the host tests (Chapter 14) compile the *pure*
+  natively, which is exactly why the host tests (Chapter 15) compile the *pure*
   code a second time for the Mac.
 - **`-ffreestanding -fno-builtin`** — freestanding, and also stop the compiler
   from "helpfully" recognizing a loop as `memset` and calling a `memset` you
@@ -709,7 +719,7 @@ The compiler and linker give you two artifacts: flat binaries for the two
 bootloader stages (`nasm -f bin`) and an ELF for the kernel. The firmware,
 however, does not load ELFs or link scripts — it loads *sectors off a disk*. So
 `tools/mkimage.py` assembles a raw disk image with a specific on-disk layout
-(the full contract is `docs/boot-protocol.md`):
+(the full contract is Appendix E):
 
 | LBA | Contents |
 |-----|----------|
@@ -761,20 +771,28 @@ Putting it together, `make` walks this pipeline:
 
 ```
 boot/*.asm      --nasm -f bin-->   stage1.bin, stage2.bin
-user/*.c,*.asm  --clang/nasm/lld->  init.elf, hello.elf  (embedded into kernel .rodata)
 kernel/**.c,*.asm --clang/nasm-->  *.o  --ld.lld -T linker.ld-->  kernel.elf
                                     |
                      tools/mkimage.py assembles + patches
                                     v
-                              build/disk.img
+                              build/disk.img                (the boot disk)
+
+user/*.c,*.asm  --clang/nasm/lld-->  init.elf, hello.elf
+                                    |
+                     build/graphfs_mkfs installs at /bin (+ --dir /dev)
+                                    v
+                              build/fs.img                  (the filesystem disk)
 ```
 
-The userspace ELFs are currently *embedded into the kernel's `.rodata`*
-(`kernel/user_blob.asm` uses NASM's `incbin`) so that Phase 4 could run
-processes before a filesystem existed to load them from — a scaffold that Phase
-5c removes once the kernel can read `/bin/init` off graphfs. That is
-complete-or-absent in action: rather than a fake filesystem, an honest embedded
-blob with a clear expiry date.
+Two disks, two pipelines: the boot disk carries the bootloader and kernel; the
+filesystem disk is a graphfs image built by the project's own `graphfs_mkfs`
+tool, which installs the userspace ELFs at `/bin` — the kernel loads `/bin/init`
+from it at boot (Chapter 14). It was not always so: through Phase 4 the user
+ELFs were *embedded into the kernel's `.rodata`* (a `user_blob.asm` using NASM's
+`incbin`) so processes could run before any filesystem existed — an honest
+scaffold with a clear expiry date, torn down on schedule in Phase 5c. That is
+complete-or-absent in action: rather than a fake filesystem, an embedded blob
+that said plainly what it was, and then left.
 
 You now have a toolchain that produces a bootable image for a machine with no
 OS. In the next chapter the firmware loads sector 0 and runs it, and we begin
@@ -878,7 +896,7 @@ immediately instead of hanging. **Make your failures loud and machine-detectable
 
 Stage 2 (`boot/stage2.asm`, ~530 lines) has room to do real work. It executes a
 precise sequence, each step a prerequisite for the next. The full contract is
-`docs/boot-protocol.md`; here is what each move *is* and why it is hard.
+Appendix E; here is what each move *is* and why it is hard.
 
 **1. Enable the A20 line.** For backwards compatibility with the 1 MiB
 wraparound behavior of the original 8086, PCs boot with address line 20 forced
@@ -958,7 +976,7 @@ including how you scream when you fail.
 Notice what the last step actually is: stage 2 fills a `struct bootinfo` at a
 fixed physical address (`0x6000`) and passes its pointer to the kernel. That
 struct — magic `"HLCN"`, a version, the boot drive, and the E820 array — is a
-**versioned interface** (`docs/boot-protocol.md`, `BOOTINFO_VERSION`). The
+**versioned interface** (Appendix E, `BOOTINFO_VERSION`). The
 kernel validates all of it on entry (`bootinfo_get()` in `main.c`) and panics on
 any mismatch: bad magic, wrong version, zero or too-many E820 entries.
 
@@ -1083,7 +1101,7 @@ standard than the code you find them in: it has to work when the rest of the
 kernel is broken, and it must never make things worse. Every design choice
 below follows from that.
 
-As the commit ledger records (Chapter 15), `vsnprintf` was written and
+As the commit ledger records (Chapter 16), `vsnprintf` was written and
 host-tested *before the bootloader existed* — the first freestanding code in
 the project ran under AddressSanitizer on a Mac before any code ran on the
 metal. `kernel/lib/fmt.c` is a complete C99 formatter (flags, width,
@@ -1147,7 +1165,7 @@ print `system halted`, halt forever. File and line cost nothing and convert
 per Chapter 0, is the first thing you read in any hunt. The register dumps
 for hardware exceptions live one layer down, in the trap dispatcher (§4.5),
 where the trapframe actually is. Together they enforce the property the
-whole test architecture leans on (Chapter 14): every fatal path is loud,
+whole test architecture leans on (Chapter 15): every fatal path is loud,
 patterned, and machine-detectable — which is precisely what makes silence
 itself diagnostic.
 
@@ -1456,7 +1474,7 @@ matters.
 
 ## 6.4 What "reserved above 4 GiB" teaches about honesty
 
-One more decision from `docs/memory-map.md`: reserved E820 ranges above 4 GiB —
+One more decision from Appendix F: reserved E820 ranges above 4 GiB —
 for instance the 64-bit PCI MMIO hole — are *deliberately not mapped* by the
 kernel. The kernel maps all RAM plus the first 4 GiB (to reach legacy MMIO), and
 stops. Anything the hardware placed above 4 GiB that the kernel does not yet
@@ -1543,7 +1561,7 @@ does. Understand this and the address-space design in Chapter 10 becomes obvious
 ## 7.2 The layout: higher-half kernel, direct map, and the null trap
 
 `vmm_init()` throws away the bootloader's temporary tables and builds the
-kernel's permanent address space (`docs/memory-map.md`):
+kernel's permanent address space (Appendix F):
 
 | Virtual range | Maps to | Attributes |
 |---------------|---------|------------|
@@ -1607,7 +1625,7 @@ And then — the professional capstone — a **boot self-test verifies the
 protections actually took**. It attempts a write to a read-only page and confirms
 it faults, checks that data pages are NX, and so on. A security property you
 merely *configured* is a hope; a security property you *tested at runtime* is a
-fact. `docs/memory-map.md`: protections are "verified by boot selftests." This is
+fact. Appendix F: protections are "verified by boot selftests." This is
 the recurring highest standard of the whole codebase — do not assert that
 something is safe, arrange for the machine to demonstrate it on every boot.
 
@@ -1748,7 +1766,7 @@ recurring theme — it *proves* adherence rather than trusting it. The scheduler
 self-tests assert the heap returns to its **exact pre-test object count** after
 threads are created and joined; the process self-tests assert the physical frame
 count is identical before and after an entire fork/exec/wait cycle
-(`docs/userspace.md`: "the whole fork/exec/wait cycle leaks nothing"). A single
+(Appendix H: "the whole fork/exec/wait cycle leaks nothing"). A single
 leaked control block would fail the boot.
 
 This is a powerful pattern you should copy into any long-lived system you build:
@@ -1803,7 +1821,7 @@ manage the flow that was already running. (Recall `entry.asm` marked
 `kstack_top` global "the scheduler adopts this as thread 0's stack" — this is the
 payoff.)
 
-The states a thread moves through (`docs/scheduling.md`):
+The states a thread moves through (Appendix G):
 
 - **READY** — runnable, sitting on the ready queue.
 - **RUNNING** — on the CPU; at most one at a time.
@@ -2556,7 +2574,7 @@ one. Designing a durable, corruption-resistant on-disk layout is one of the
 deepest skills in systems programming, because the format is a contract with your
 own future self across power failures and years of code changes — and unlike an
 API, you cannot refactor it without a migration. The authoritative format spec is
-`docs/graphfs.md`; this chapter is the reasoning behind it.
+Appendix K; this chapter is the reasoning behind it.
 
 ## 13.1 The design decision: a graph, not a tree
 
@@ -2635,7 +2653,7 @@ is stated, not blurred.
 
 ## 13.4 The layout, and what the constants encode
 
-The on-disk geometry (full table in `docs/graphfs.md`, offsets in
+The on-disk geometry (full table in Appendix K, offsets in
 `kernel/include/graphfs_core.h`) is: two superblock slots at LBA 0 and 1, then two
 allocation-bitmap copies, then a copy-on-write region that begins with a node-map
 block and the root directory's node-table block and grows on demand. 4 KiB blocks
@@ -2732,7 +2750,199 @@ all of it trustworthy, and one to where the road goes from here.
 
 <div style="page-break-after: always"></div>
 
-# Chapter 14 — Testing and Professional Discipline
+# Chapter 14 — The VFS: One Namespace Over Many Filesystems
+
+The previous two chapters built a disk and a filesystem format. What they did not
+build is the thing a process actually uses: `open("/bin/hello", O_RDONLY)`. Between
+"graphfs can resolve a path" and "a ring 3 program reads a file through a small
+integer" sits the **virtual filesystem** — the layer that owns the namespace, the
+open-file abstraction, and the file descriptor table, and that lets `/dev/console`
+(a device) and `/bin/init` (a graphfs node) answer the same syscalls without the
+caller knowing the difference. This chapter is that layer, and it is also the
+chapter where the kernel grows its first *sleeping* lock and loads init from disk,
+retiring the last scaffold from Phase 4.
+
+## 14.1 Three objects, one discipline
+
+The VFS (`kernel/fs/vfs.c`) is built from three small objects, each with one job:
+
+- **`struct file_ops`** — a vtable of five operations (`read`, `write`, `lseek`,
+  `fstat`, `getdents`). This is polymorphism in plain C: a graphfs regular file, a
+  graphfs directory, the console device, and the `/dev` directory are four ops
+  tables, and everything above them dispatches through the pointer without a
+  single `if (is_device)` anywhere in the syscall layer. A `NULL` slot means "this
+  operation does not apply here," and the syscall layer maps it to the
+  conventional errno — `write` on a read-only file is `-EBADF`, `lseek` on the
+  console is `-ESPIPE`, `getdents64` on a regular file is `-ENOTDIR`. The error
+  vocabulary is part of the interface, decided once, at the boundary.
+- **`struct file`** — an *open file description*, the POSIX term worth being
+  precise about: it holds the ops pointer, the object identity, the **offset**,
+  and a reference count. It is not the fd. When a process forks, parent and child
+  fds point at the *same* description — read in one and the other's offset moves.
+  That is not an accident of implementation; it is the POSIX contract that makes
+  `fork` + shared logs work, and getting it right costs exactly one refcount.
+- **The mount table** — compile-time in v1: graphfs on the root block device is
+  `/`, and devfs covers `/dev`. Resolution is a longest-prefix match on the
+  canonical path; whatever no mount claims belongs to the root filesystem. The
+  `/dev` directory also exists *on disk* as an empty graphfs namespace
+  (`graphfs_mkfs --dir /dev`), the way a mount point does on any Unix — the mount
+  covers it, but `ls /` still lists it, because the namespace under a mount point
+  is the on-disk one.
+
+The fd table itself lives with the process (`struct process`, Chapter 11): a
+small array of `struct file *`. `fork` duplicates the pointers and bumps
+refcounts; `execve` deliberately leaves the table alone (no close-on-exec flags
+yet — documented); exit closes everything. Init starts life with fds 0/1/2 all
+referencing one open of `/dev/console` — one description, three references,
+exactly what a login shell would inherit.
+
+## 14.2 Path walking: the one pure piece, and why lexical ".." is honest here
+
+Every path entering the VFS is first **normalized lexically** by
+`vfs_path_norm()` (`kernel/fs/vfs_path.c`): duplicate slashes collapse, `.`
+disappears, `..` pops a component, popping above the root stays at the root, and
+the output is always a canonical absolute path. The function is pure C over two
+buffers — no kernel dependencies — so it is host-tested under ASan/UBSan
+(`tests/host/test_vfs_path.c`) with a table of canonical forms and every
+rejection path, like every other core in the tree. Filesystems never see a `.` or
+`..`: `gfs_resolve()` stays the simple plain-component walk Chapter 13 built.
+
+Be honest about *when* this is correct. Lexical `..` handling is exactly right
+here **because the graphfs v1 namespace is a strict tree with no symlinks**:
+every directory has one name, so dropping the last component of a canonical path
+*is* its parent. The day symlinks arrive, `/a/b/..` may no longer be `/a`, and
+normalization has to move into the resolution walk. The comment at the top of
+`vfs_path.c` says precisely this — a design decision pinned to the invariant that
+justifies it, so the person who breaks the invariant finds the consequence
+written where they will trip over it.
+
+One more scoping decision of the same kind: there is no `chdir` yet, so every
+process's working directory is defined to be `/` and relative paths resolve from
+there. Not "relative paths are rejected," not "undefined" — defined, documented,
+and replaced when cwd machinery arrives.
+
+## 14.3 The kernel's first sleeping lock
+
+Until now the kernel's only mutual exclusion was interrupts-off sections —
+correct on one CPU, and fine for microsecond-scale work (Chapter 9). Disk I/O
+breaks that model: a block read takes *milliseconds* and must keep interrupts on
+(the driver polls a timer). Meanwhile the `struct gfs` handle is single-caller by
+contract — its block scratch buffers cannot host two walks at once — and after
+this chapter, *every process in the system* can reach the disk through a syscall.
+Two forked children execing simultaneously would interleave core calls and
+corrupt the walk state.
+
+The answer is the kernel's first **sleeping mutex** (`kernel/sched/mutex.c`),
+~70 lines over the primitives Chapter 9 already proved: contenders queue FIFO and
+`sched_block()`; `mutex_unlock()` *hands the lock to the oldest waiter* before
+waking it. The handoff detail is worth noticing — the lock is never observably
+free while anyone queues, so a fresh arrival cannot barge past a sleeper, which
+is FIFO fairness and starvation-freedom in two lines. The waiter queue reuses
+`thread->next`, which a blocked thread is provably not using — the same
+"a thread is on at most one list" invariant from Chapter 9, cashed in.
+
+One global `fs_lock` inside `vfs.c` serializes every graphfs core call and every
+file-offset update. That single lock also **discharges the block layer's
+documented debt**: Chapter 12 left `block.c` asserting "one caller at a time"
+with a note that the VFS would bring the real lock, and now it has — the comment
+in `block.h` records the discharge. A promissory note in a comment is only
+honest if someone actually pays it; slice 5c was where this one came due.
+
+## 14.4 devfs and the blocking read: the lost-wakeup pattern, third appearance
+
+devfs (`kernel/fs/devfs.c`) is deliberately tiny: `/dev/console` and the `/dev`
+directory itself, each an ops table and a synthetic inode number. Console writes
+go to the kernel console. Console *reads* are the interesting part: they must
+**block** until the keyboard produces input — the first time a syscall sleeps on
+a device.
+
+The race to beat is the same lost wakeup that `wait4` fought in Chapter 11: if
+the reader checks the buffer (empty), and the keyboard interrupt fires *before*
+the reader sleeps, the wakeup is lost and the reader sleeps forever. The cure is
+also the same, because it is *the* cure: publish the waiter and block inside one
+interrupts-off section. The keyboard IRQ handler gets a one-line notify hook
+(`keyboard_set_notify`) that wakes the published reader. By the third appearance
+— join, wait4, now console read — the pattern should feel like an instinct:
+**check-and-sleep must be atomic against the waker.**
+
+Read semantics are terminal-style: block until at least one character exists,
+then return what the buffer holds (a short read), because an interactive caller
+asking for 100 bytes wants the 3 you have now, not a wait for 97 more. A second
+lock (`read_lock`) serializes concurrent readers so the single waiter slot
+suffices — a scoped simplification that holds until someone actually wants
+competing console readers.
+
+## 14.5 exec from disk: the scaffold comes down on schedule
+
+Chapter 2 called the ELF images embedded in kernel `.rodata` "an honest scaffold
+with a clear expiry date." This is the expiry date. `process_execve()` and
+`process_run_init()` now call `vfs_read_file()` — resolve, size, read the whole
+image into a kernel buffer, load, free — and the built-in program table,
+`kernel/user_blob.asm`, and the `incbin` build rule are *deleted*. The boot
+marker changes from `launching init (embedded ELF)` to:
+
+```
+user: launching init (/bin/init from disk, 13448 bytes)
+```
+
+and the integration test asserts the new text — the boot now *proves* init came
+off the graphfs image, because there is no other place it could come from.
+
+The syscall surface grows to match, and every new syscall keeps the Linux x86_64
+ABI bit-for-bit: `read` 0, `open` 2, `close` 3, `fstat` 5, `lseek` 8,
+`getdents64` 217, alongside the existing numbers. `struct stat` is the Linux
+144-byte layout (`_Static_assert`ed), `getdents64` emits real `linux_dirent64`
+records, and directories synthesize `.` and `..` entries the way readdir
+consumers expect. None of this costs more than inventing a private layout would,
+and it is exactly what makes the Phase 7 personality layer a numbering no-op
+(Appendix H tabulates the whole surface).
+
+## 14.6 Proving it: the acceptance suite grows 27 checks
+
+Init's role as the boot acceptance test (Chapter 11) extends to the whole VFS
+read side — checks 21 through 47 open a known file and verify its ELF magic,
+prove `lseek END/SET` against `fstat`'s size, walk `/bin` with `getdents64` and
+require *exactly* `.`, `..`, `init`, `hello` and nothing else, then probe every
+error contract: `-ENOENT` for a missing name, `-ENOTDIR` for a path through a
+file, `-EISDIR` for reading a directory, `-EROFS` for opening anything on disk
+for write (the mount is read-only until 5d), `-EBADF` after close, `-ESPIPE`
+for seeking the console. A path like `/dev/../bin/./hello` must resolve — the
+normalizer's host tests re-proven end-to-end from ring 3. The exit status names
+the first failure; the boot test asserts 27 serial markers and `status 0`.
+
+The read side of a filesystem is the half you can prove without being able to
+mutate anything; the write path (`write`, `mkdir`, `link`, `unlink`, `rename`,
+`fsync`) is slice 5d, where the fsck-after-boot gate turns every future boot
+test into a crash-consistency test.
+
+## 14.7 The transferable lessons
+
+- **An ops vtable plus a refcounted description is the whole VFS trick.** Four
+  ops tables, one dispatch site, POSIX offset-sharing from one refcount — no
+  type switches anywhere above the filesystems.
+- **Pin a lexical shortcut to the invariant that makes it sound.** Lexical `..`
+  is *correct* under a strict tree with no symlinks; the comment names the
+  invariant so its removal takes the shortcut with it.
+- **When critical sections learn to sleep, interrupts-off stops being a lock.**
+  Millisecond I/O plus multiple callers forced the first real mutex — and
+  unlock-by-handoff bought fairness for free.
+- **Pay your documented debts, and record the payment.** The block layer's
+  "single caller until the VFS" note was a promissory note; the discharge is
+  written where the promise was.
+- **The same race deserves the same cure, every time.** Publish-then-block
+  interrupts-off killed the lost wakeup in join, wait4, and now console read.
+  Collect patterns, not incidents.
+- **Let the acceptance suite grow with the surface.** Every new syscall landed
+  with checks a boot cannot pass without executing them.
+
+The kernel now walks one namespace from `/` to devices and disk files, and
+nothing it runs is embedded in it. What remains of Phase 5 is teaching the
+namespace to change — the write path — with the crash-consistency gate that
+graphfs's copy-on-write design was built to pass.
+
+<div style="page-break-after: always"></div>
+
+# Chapter 15 — Testing and Professional Discipline
 
 Every subsystem chapter ended with the machine proving something on every boot.
 This chapter steps back and treats that as the subject in its own right, because
@@ -2743,10 +2953,10 @@ anyway is a test architecture that makes correctness *cumulative*: every propert
 you establish stays established forever. If you internalize one chapter's *method*
 rather than its facts, make it this one.
 
-## 14.1 Three levels, three kinds of truth
+## 15.1 Three levels, three kinds of truth
 
 `make check` is the gate for every commit, and it runs three levels of testing
-that catch three genuinely different classes of bug (`docs/testing.md`).
+that catch three genuinely different classes of bug (Appendix L).
 
 **Level 1 — host unit tests, under sanitizers.** The arch-neutral *pure cores*
 (`string.c`, `fmt.c`, `pmm_core.c`, `heap_core.c`, `sched_core.c`, `elf64.c`,
@@ -2795,7 +3005,7 @@ Three levels, three truths: **logic** (level 1, sanitized), **codegen/environmen
 (level 2, real toolchain), **integration** (level 3, real boot). A bug lives in
 exactly one of those categories, and the architecture has a net under each.
 
-## 14.2 Markers as an append-only ledger of proven behavior
+## 15.2 Markers as an append-only ledger of proven behavior
 
 The integration test keys on serial-console markers, and the governing rule is:
 **existing markers are never removed, only added to.** Each marker is a permanent
@@ -2811,7 +3021,7 @@ generalizes far beyond kernels: make your regression suite an **append-only ledg
 of things that once worked**, and never delete an assertion because the feature it
 covers is "old and stable" — old and stable is exactly what silently breaks.
 
-## 14.3 Design your failures to be loud and machine-detectable
+## 15.3 Design your failures to be loud and machine-detectable
 
 A test harness can only catch failures it can *see*. This project's bootloader and
 kernel are written so that **every fatal path emits a detectable pattern** — `ERR:`
@@ -2829,9 +3039,9 @@ straight back to Chapter 1's complete-or-absent — an explicit `-ENOSYS`, a
 failure impossible to miss.** Code that fails loudly is code you can build a robot
 around; code that fails silently is code you have to babysit forever.
 
-## 14.4 The policy that ties it together
+## 15.4 The policy that ties it together
 
-Three rules govern the whole project (`docs/testing.md`), and they are worth
+Three rules govern the whole project (Appendix L), and they are worth
 adopting verbatim:
 
 1. **`make check` must pass before every commit.** The gate is not advisory. Green
@@ -2852,7 +3062,7 @@ the real kernel flags). These are cheap, automatic, and non-negotiable — the p
 of a mechanical gate is that it removes an entire category of judgment call and
 bikeshedding from every code review.
 
-## 14.5 The design doc: deciding on paper, where changing your mind is free
+## 15.5 The design doc: deciding on paper, where changing your mind is free
 
 There is a second discipline running alongside the tests, easy to miss
 because its artifacts look like documentation: **every subsystem was
@@ -2862,7 +3072,7 @@ the memory map, scheduling, userspace, storage, graphfs, the test strategy
 itself — and the commit ledger shows them landing *with* their subsystems,
 then updated in the same commit as every change ("Docs updated ... Version
 0.4.1"). This is a skill no OS book teaches, so learn it from the artifacts:
-open `docs/scheduling.md` and read its section list as a template —
+open Appendix G and read its section list as a template —
 
 1. **Layering** — what sits above and below, and which direction calls flow.
 2. **The model** — the states and structures, in plain declarative sentences.
@@ -2885,14 +3095,14 @@ once meant to be. A design doc that can drift from its code is worse than
 none, which is exactly why "docs updated" appears in the ledger next to
 every feature — same commit, same review, same gate. And when a document
 describes an interface two programs must agree on, it gets a version:
-`docs/boot-protocol.md` is "boot protocol v1," a numbered contract between
+Appendix E is "boot protocol v1," a numbered contract between
 loader and kernel (Chapter 3 §3.4). Comments hold the local, load-bearing
 constraint at the line that needs it; design docs hold the shape of the
 subsystem; commit messages hold the change and its proof. Three channels,
 three jobs — a codebase that uses all three deliberately is one you can
 join, or return to after a year, without an oral tradition.
 
-## 14.6 Why this is the chapter that matters most
+## 15.6 Why this is the chapter that matters most
 
 Here is the honest truth about building something this large and unforgiving: you
 will not write it correctly the first time. Nobody does. The bootloader's A20
@@ -2914,7 +3124,7 @@ Master this and everything else in the book becomes *achievable*, because you no
 longer need to be perfect — you need to be rigorous, and rigor is a system you
 build, not a talent you are born with.
 
-## 14.7 The transferable lessons
+## 15.7 The transferable lessons
 
 - **Test at three levels for three kinds of bug:** sanitized host tests for
   logic, in-kernel self-tests for codegen/environment, integration boot for the
@@ -2933,7 +3143,7 @@ build, not a talent you are born with.
 
 <div style="page-break-after: always"></div>
 
-# Chapter 15 — How an OS Actually Gets Built: Slices, Gates, and the Definition of Done
+# Chapter 16 — How an OS Actually Gets Built: Slices, Gates, and the Definition of Done
 
 Every OS book — this one included, until now — presents subsystems in their
 finished form, ordered by dependency: memory before scheduling, scheduling
@@ -2950,7 +3160,7 @@ one of them ending with `make check` green, every message recording what
 landed and what proved it. This chapter reads that ledger as what it is —
 a decision journal — and extracts the sequencing discipline from it.
 
-## 15.1 The ledger
+## 16.1 The ledger
 
 Read down this table slowly; the order itself is the curriculum.
 
@@ -2982,9 +3192,9 @@ gates first, library before bootloader, harness immediately after first
 boot, docs before the second phase, a bug-fix slice in the middle of Phase
 4\. Third pass: notice the right-hand column is never empty (except the
 docs commit — whose artifact *is* the proof). That column is the subject of
-§15.4.
+§16.4.
 
-## 15.2 The net went up before the wire
+## 16.2 The net went up before the wire
 
 The single most instructive fact in the ledger is commit 2. Before there
 was a bootloader — before this project could execute *anything* on the
@@ -3006,7 +3216,7 @@ image headless and asserts its output. From that moment forward, *nothing
 was ever demonstrated by hand again.* Every subsequent row in the ledger
 inherits an automated definition of "still works." The cost of the harness
 was one commit; the return is that eighteen commits of accumulated behavior
-are re-proven on every `make check` forever (Chapter 14's ratchet, seen
+are re-proven on every `make check` forever (Chapter 15's ratchet, seen
 from the other end: the ratchet had to be *installed early* to be worth
 anything).
 
@@ -3015,7 +3225,7 @@ The boot protocol was written down as a versioned contract at the moment
 exactly two programs depended on it and both were fresh in mind. Contracts
 are cheapest to write at the boundary where they were just negotiated.
 
-## 15.3 Vertical slices, and the smallest observable win
+## 16.3 Vertical slices, and the smallest observable win
 
 Look at how Phase 4 — userspace — is cut. A lesser plan says "implement
 processes": ELF loading, fork, exec, wait, fault handling, all of it, then
@@ -3060,7 +3270,7 @@ a toy; it is a scope decision of professional precision — small enough that
 ring-transition bugs have nowhere to hide, real enough that the marker it
 prints is asserted forever after.
 
-## 15.4 The definition of done, in the authors' own hand
+## 16.4 The definition of done, in the authors' own hand
 
 Read the closing lines of the ledger's commit messages, because they are a
 definition of "done" stated nineteen times:
@@ -3074,7 +3284,7 @@ definition of "done" stated nineteen times:
 > "Docs updated ... Version 0.4.1. Phase 4 complete."
 
 Four ingredients recur. **Proof at the right level** — pure logic cites host
-assertions, boot-visible behavior cites markers (Chapter 14 §14.4's rule 3,
+assertions, boot-visible behavior cites markers (Chapter 15 §15.4's rule 3,
 applied per commit, not per release). **Proof of the proof** — commit 17
 did not just add a test; it broke the fix on purpose and recorded that the
 test fails, because a test you have never seen fail proves nothing.
@@ -3092,7 +3302,7 @@ is not just ordering the features; it is *granting hardening the same
 slice-level dignity as features*, at the moment the debt is found, not "in
 a cleanup pass later" that history shows never comes.
 
-## 15.5 Changing your mind is a slice, too
+## 16.5 Changing your mind is a slice, too
 
 Commit 18 opens with something you will almost never see preserved:
 "The direction for this phase changed by decision: the native filesystem
@@ -3111,12 +3321,12 @@ substrate, Chapter 13). What the ledger teaches is not *that* plans change
 - **The displaced work was re-scoped, not deleted.** ext2 moved to Phase 7
   with a stated role. A plan is a priority queue, not a promise.
 - **The decision was recorded where the code landed** — first line of the
-  commit, plus a design doc (`docs/storage.md`) written before the slice.
+  commit, plus a design doc (now Appendix I) written before the slice.
   Two years from now, "why graphfs and not ext2" has an answer in `git log`
   instead of in someone's departed memory. (Chapter 0's advice to read real
   kernels' changelogs is this same channel, consumed from the other side.)
 
-## 15.6 Hooks, not half-features
+## 16.6 Hooks, not half-features
 
 Sequencing has a paradox: you must not build ahead (complete-or-absent,
 Chapter 1 §1.3), yet the ledger is full of Phase-2 decisions that Phase-4
@@ -3138,7 +3348,7 @@ carry; an implementation built for tomorrow is a liability you debug.
 *not* built early, precisely because it is an implementation, not an
 interface.)
 
-## 15.7 Scoping your own next slice
+## 16.7 Scoping your own next slice
 
 Distilled from the ledger, the questions to answer — in writing, before the
 first line of code — when you cut your next slice on your own kernel:
@@ -3155,15 +3365,15 @@ first line of code — when you cut your next slice on your own kernel:
    a deliverable, not an omission.
 5. **What does the layer below have to promise?** If the promise is not
    already written down, writing it down is part of *this* slice — that is
-   how the boot protocol and `docs/userspace.md` came to exist.
+   how the boot protocol (Appendix E) and the syscall ABI contract (Appendix H) came to exist.
 6. **What would prove a regression?** The marker or test this slice adds is
-   permanent (Chapter 14 §14.2); name what it will catch.
+   permanent (Chapter 15 §15.2); name what it will catch.
 
 Answer those six and the slice plans itself. Most of what looks like
 engineering judgment in the ledger is these questions, asked every time,
 answered honestly.
 
-## 15.8 The transferable lessons
+## 16.8 The transferable lessons
 
 - **Sequence so that every step's failure is debuggable with the tools of
   the previous step.** Library under sanitizers, then bootloader with
@@ -3192,7 +3402,7 @@ final chapter's subject.
 
 <div style="page-break-after: always"></div>
 
-# Chapter 16 — Where to Go Next
+# Chapter 17 — Where to Go Next
 
 You have followed the system from the firmware's first instruction to a
 crash-consistent filesystem holding the programs the kernel boots. That is a
@@ -3203,7 +3413,7 @@ how the concepts *connect* rather than as isolated exam answers. This final
 chapter is about turning that understanding into mastery: what to build next, and
 how to keep growing.
 
-## 16.1 The road this project is on
+## 17.1 The road this project is on
 
 The roadmap (README) runs to phase 10, and each remaining phase is a chance to
 learn a major subsystem:
@@ -3238,7 +3448,7 @@ why the PCI scan is written to extend to bridges, why UEFI and bare-metal driver
 today. Designing for a target you have not reached yet, at the interfaces rather
 than the implementations, is the through-line.
 
-## 16.2 How to actually get better at this
+## 17.2 How to actually get better at this
 
 Reading a system teaches you a lot; the next order of magnitude comes from
 *changing* one. [Appendix B](appendix-b-lab-book.md) turns everything below into
@@ -3267,7 +3477,7 @@ The short version, roughly in order:
    QEMU forgives, real firmware and real devices will not, and the gap *is* the
    curriculum.
 
-## 16.3 The habits that compound
+## 17.3 The habits that compound
 
 Strip away the specifics and the transferable lessons from every chapter collapse
 into a handful of habits. These are what to carry into any systems work, on any
@@ -3293,7 +3503,7 @@ codebase:
 - **Prove it every time, and never delete the proof.** Correctness is cumulative
   or it is temporary.
 
-## 16.4 A closing word
+## 17.4 A closing word
 
 The reason an operating system is the classic proving ground for a systems
 programmer is not that it is the hardest code to write line by line — plenty of
@@ -3578,7 +3788,7 @@ builder, because the difference between the two is repetitions: hours spent
 changing a kernel, breaking it, watching it fail, and fixing it with the
 instruments from Chapter 0. Every lab below is concrete, runs against this
 repository, and ends with a verification step — because "done" here means the
-machine demonstrates it (Chapter 14), including for your homework.
+machine demonstrates it (Chapter 15), including for your homework.
 
 **Difficulty grades:**
 
@@ -3673,7 +3883,7 @@ you haven't learned yet (chase it — Appendix A style).
 
 Each of these adds something real. The deliverable is not just the feature: it's
 the feature **plus** its host tests, its boot marker or selftest, and its docs
-paragraph — the full Chapter 14 definition of done.
+paragraph — the full Chapter 15 definition of done.
 
 1. ★★ **A new syscall: `uname` (63)** — return a hardcoded
    `struct utsname` through a validated user pointer. Small, but it walks the
@@ -3838,7 +4048,7 @@ contract usually *is* the design the next feature needs.
 
 ### The proof
 
-Rule 2 of the testing policy (Chapter 14): a bug fix lands with a test that
+Rule 2 of the testing policy (Chapter 15): a bug fix lands with a test that
 failed before it. The test here is worth studying because getting it right
 is subtle — you are trying to catch the *compiler* being entitled to hurt
 you, using the compiler:
@@ -3874,7 +4084,7 @@ fails; with the fix, all fifteen markers pass.
   contract-vs-code read is a debugging instrument too — arguably the highest-
   yield one, and the only one that works on bugs that haven't fired yet.
 - **When you fix a contract bug, fix the written contract too.** The same
-  commit added a "preserved" row to `docs/userspace.md`'s ABI table. The next
+  commit added a "preserved" row to Appendix H's ABI table. The next
   reader of the stub now has the promise in front of them.
 
 ---
@@ -4064,10 +4274,1326 @@ distinguishable at all. (Instruments: Chapter 0 §0.5.)
 
 Two rules complete the table. First, **silence is data**: in a codebase
 where every failure is loud, the absence of output localizes the failure to
-the regions that cannot yet speak (Chapter 14 §14.3). Second, **the last
+the regions that cannot yet speak (Chapter 15 §15.3). Second, **the last
 move of every hunt is a test** — the table gets you to a cause, but the hunt
 ends only when the cause cannot recur unannounced. That is the difference
 between "fixed it" and "finished it," and it is the through-line of all
 three stories above.
+
+<div style="page-break-after: always"></div>
+
+# Architecture Overview
+
+Hallucinate OS is a from-scratch monolithic kernel for x86_64, written in C11 and NASM,
+booted by its own two-stage BIOS bootloader. This document describes the system as it
+exists today and the structure the rest of the roadmap builds on. Companion documents:
+
+- [Appendix E](appendix-e-boot-protocol.md) — bootloader ↔ kernel contract (versioned)
+- [Appendix F](appendix-f-memory-map.md) — physical and virtual address space layout
+- [Appendix G](appendix-g-scheduling.md) — threads, context switch, preemption
+- [Appendix H](appendix-h-userspace.md) — ring 3, syscall ABI, ELF loading, the process model
+- [Appendix I](appendix-i-storage.md) — PCI, virtio-blk, the block layer
+- [Appendix J](appendix-j-vfs.md) — the VFS: mounts, open files, fd tables, devfs
+- [Appendix K](appendix-k-graphfs.md) — graphfs, the native filesystem's on-disk format
+- [Appendix L](appendix-l-testing.md) — the three-level test strategy behind `make check`
+
+## Design principles
+
+1. **Everything from scratch.** No third-party code in the boot path or kernel. Where an
+   external interface is implemented (ELF, VIRTIO, the Linux syscall ABI), it is
+   implemented against the published specification.
+2. **Arch split from day one.** All x86_64-specific code lives in `kernel/arch/x86_64/`;
+   the rest of the kernel is arch-neutral C. A future aarch64 port adds a directory, not
+   a rewrite.
+3. **Deterministic kernel, AI as a service.** AI integration (roadmap Phase 6) happens
+   via a privileged userspace daemon and device nodes — never inside kernel space.
+4. **Complete or absent.** Features are fully implemented within their documented scope
+   or not merged. Unsupported operations fail explicitly.
+
+## Source tree
+
+```
+boot/                     two-stage BIOS bootloader (NASM, flat binaries)
+kernel/
+  arch/x86_64/            entry stub, GDT/TSS, IDT + trap dispatch (isr.asm),
+                          IRQ layer, 8259 PIC, 4-level paging, context switch
+                          (ctx.asm), port I/O, CPU intrinsics
+  drivers/                serial (16550), VGA text, 8254 PIT, PS/2 keyboard
+                          (kbd_map.c: pure scancode translation, host-tested),
+                          pci.c (bus scan, config space), virtio_pci.c
+                          (VIRTIO 1.2 modern transport), virtq_core.c (pure
+                          split-ring bookkeeping, host-tested), virtio_blk.c
+  block/                  block device layer: 4 KiB blocks, write-through
+                          LRU cache over the registered driver
+  fs/                     graphfs_core.c (pure on-disk format engine,
+                          host-tested), vfs.c (mounts, open files, graphfs
+                          vnode ops), vfs_path.c (pure path normalization,
+                          host-tested), devfs.c (/dev/console)
+  mm/                     pmm_core.c + pmm.c (frame allocator),
+                          vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
+  sched/                  sched_core.c (policy, host-tested) + sched.c
+                          (threads, sleep/wake, join, preemption),
+                          mutex.c (sleeping FIFO mutex)
+  proc/                   proc_core.c (process table, host-tested) +
+                          process.c (fork/execve/wait4/exit, fd tables),
+                          elf_load.c (segment loader), syscall.c (dispatch),
+                          uaccess.c (user pointer validation and copies)
+  lib/                    freestanding C library: string.c, fmt.c (vsnprintf),
+                          elf64.c (pure ELF64 validator, host-tested)
+  include/                public kernel headers (bootinfo.h, memlayout.h, ...)
+  console.c               console multiplexer (serial + VGA)
+  kprintf.c               formatted kernel logging
+  panic.c                 fatal-error path (file/line, halt)
+  selftest.c              boot-time assertion suite
+  main.c                  kmain: bring-up sequence
+  linker.ld               higher-half link script (W^X section symbols)
+user/                     userspace: init.c, hello.c, crt0.asm, syscall.h
+                          wrappers, user.ld (static ELF64 at 0x400000, W^X
+                          segments); installed on fs.img at /bin
+tools/mkimage.py          boot disk image assembler + boot-protocol validator
+tools/graphfs_mkfs.c      builds fs.img (graphfs) from host files
+tools/graphfs_fsck.c      offline graphfs invariant checker (make check gate)
+tests/host/               unit tests, compiled for macOS under ASan/UBSan
+tests/run_qemu.py         headless QEMU integration harness
+docs/book/                this documentation (chapters + these appendices)
+```
+
+## Boot flow
+
+```
+BIOS → stage1 (MBR, LBA read) → stage2 (A20, E820, unreal-mode kernel load,
+protected mode, page tables, long mode, ELF64 load) → _start → kmain
+```
+
+Details and the exact CPU/register contract are in [boot-protocol.md](boot-protocol.md).
+
+## Kernel bring-up sequence (`kmain`)
+
+1. `console_init()` — serial COM1 (115200 8N1, with loopback self-test; a missing UART is
+   tolerated) and VGA text mode. All output goes to both sinks.
+2. `gdt_init()` / `idt_init()` / `pic_init()` / `irq_init()` — kernel descriptor tables
+   (TSS with a dedicated double-fault IST stack), 256 interrupt stubs feeding a trap
+   dispatcher (unhandled traps dump all registers and panic), PICs remapped to vectors
+   0x20–0x2F and masked.
+3. Validate the bootinfo block (magic, version, E820 sanity); panic on any mismatch.
+4. `pmm_init()` — bitmap frame allocator seeded from E820 (see Appendix F).
+5. `vmm_init()` — kernel page tables: HHDM direct map, W^X kernel image, NX, no
+   identity map; page-fault handler with error decoding.
+6. `kmalloc_init()` — slab heap over PMM frames.
+7. `sched_init()` — the boot context becomes thread 0, the idle thread is created,
+   and the scheduler hooks the timer tick (see Appendix G).
+8. `syscall_init()` — SYSCALL/SYSRET MSRs (see Appendix H).
+9. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
+   ticks by sleeping on it.
+10. `pci_init()` / `virtio_blk_init()` / `block_selftest()` — bus scan, virtio-blk
+    bring-up per VIRTIO 1.2, and a write/readback/restore round trip through the real
+    device (see Appendix I).
+11. `vfs_init()` — mount the graphfs root read-only from the block device, initialize
+    devfs at `/dev` (see Appendix J). Panics if there is no disk or no valid filesystem.
+12. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
+    protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
+13. `process_run_init()` — `/bin/init` is read off the filesystem, validated, loaded
+    into a fresh user address space, and runs in ring 3 as pid 1 with fds 0/1/2 open
+    on `/dev/console`. Init exercises the whole process model and the VFS read side —
+    it forks, the child execve()s `/bin/hello` from disk, init reaps it with wait4,
+    two deliberately crashed children prove that a ring 3 fault kills only the
+    faulting process, and every file syscall is probed against known filesystem
+    contents — then exits; the kernel verifies the process table is empty and not
+    one physical frame leaked.
+14. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
+
+## Key subsystems (current)
+
+### Console and logging
+
+`console.c` fans out to the serial and VGA drivers; serial gets `\r` before `\n`.
+`kprintf` formats into a bounded stack buffer via the kernel's own full-featured C99
+`vsnprintf` (`lib/fmt.c`) — the same code that runs under sanitizers in the host test
+suite. The serial driver's transmit wait is bounded and self-disabling so a wedged UART
+can never hang the kernel.
+
+### Panic
+
+`panic(fmt, ...)` prints `PANIC: file:line: message` to all consoles and halts
+interrupts-off. `KASSERT` builds on it. The integration harness fails a boot the moment
+`PANIC` appears on the serial line. (Register dump and stack backtrace land with the
+exception infrastructure in Phase 2.)
+
+### Freestanding library
+
+`lib/string.c` and `lib/fmt.c` are UB-free, byte-exact implementations used by the whole
+kernel. They are the template for how all arch-neutral kernel logic is developed: the
+identical source files compile on macOS (with symbol renaming to avoid libc collisions)
+and run under AddressSanitizer/UBSan in `tests/host/`.
+
+## Toolchain
+
+Development host is macOS on Apple Silicon; no cross-compiler build is required:
+
+- **clang** (Xcode CLT) with `--target=x86_64-elf -ffreestanding -mcmodel=kernel
+  -mno-red-zone` and no SSE/AVX, `-Wall -Wextra -Werror`.
+- **ld.lld** (brew `lld`) with a custom higher-half link script.
+- **nasm** for the bootloader (flat binary) and kernel entry (elf64).
+- **qemu-system-x86_64** for execution; TCG emulation on Apple Silicon.
+- **clang-format / clang-tidy** (brew `llvm`) enforced via `make format-check` and
+  `make tidy`.
+
+## Roadmap shape
+
+The phase plan (see README) drives toward three pillars:
+
+1. **A real OS**: memory management, scheduling, userspace, VFS + graphfs, GUI.
+2. **Linux binary compatibility**: a Linux syscall ABI personality layer so unmodified
+   static musl binaries (busybox first) run natively — the same approach FreeBSD and
+   managarm use. Syscall coverage will be tracked in `docs/syscalls.md`.
+3. **AI as a system service**: a guest daemon (`aid`) bridged to a Claude API helper on
+   the host over virtio-serial, exposed to all processes via `/dev/ai` and dedicated
+   syscalls, with AI-native interfaces (natural-language shell, semantic open) on top.
+
+<div style="page-break-after: always"></div>
+
+# Boot Protocol (version 1)
+
+This document is the contract between the Hallucinate OS bootloader and the kernel. It is
+versioned; any incompatible change bumps `BOOTINFO_VERSION` in `kernel/include/bootinfo.h`
+and this document together.
+
+## Disk layout
+
+The system boots from a raw disk image assembled by `tools/mkimage.py`:
+
+| LBA | Contents |
+|---|---|
+| 0 | Stage 1 (MBR, exactly 512 bytes, `0xAA55` signature) |
+| 1 .. N | Stage 2, sector-padded (N ≤ 127 so stage 1 can load it in one INT 13h read) |
+| N+1 .. | Kernel ELF64 image, sector-padded |
+
+The image is zero-padded to a whole MiB.
+
+### Build-time patching
+
+Neither stage hardcodes the image geometry. `mkimage.py` locates unique markers in the
+assembled binaries and patches them:
+
+- **Stage 1**: marker `"HB1\0"` immediately precedes its Disk Address Packet. The DAP
+  sector-count word (marker offset +6) receives the stage-2 sector count. `mkimage`
+  verifies the DAP header bytes (`0x10 0x00`) follow the marker.
+- **Stage 2**: marker `"HB2\0"`; offset +4 holds the kernel start LBA (u64), offset +12
+  the kernel sector count (u32).
+
+## Stage 1 (`boot/stage1.asm`)
+
+Loaded by the BIOS at `0x7C00` with the boot drive number in `DL`.
+
+1. Canonicalizes `CS:IP` via a far jump, zeroes segment registers, sets the stack just
+   below `0x7C00`.
+2. Verifies INT 13h extensions (`AH=41h`, signature `0x55AA`); LBA reads are required.
+3. Reads stage 2 to `0x7E00` with INT 13h `AH=42h`, retrying up to 3 times with a disk
+   reset between attempts.
+4. Verifies the first dword of stage 2 is `0x32534C48` (`"HLS2"`).
+5. Far-jumps to `0:0x7E04` with `DL` still holding the boot drive.
+
+On any failure it prints an `ERR:`-prefixed message and halts. The integration test
+harness treats `ERR:` on the serial console as fatal.
+
+## Stage 2 (`boot/stage2.asm`)
+
+Entered in 16-bit real mode at `0x7E04`.
+
+1. **A20**: tests for wraparound at `0x100500`; if disabled, tries INT 15h `AX=2401h`,
+   then port `0x92` (fast A20), then the 8042 keyboard controller. All KBC waits are
+   bounded (64K polls). Failure is fatal.
+2. **E820**: walks INT 15h `AX=E820h`, storing up to 64 raw 24-byte entries directly into
+   the bootinfo block. The ACPI extended-attributes dword is preset to 1 before each call
+   so 20-byte BIOS replies remain valid. At least one entry is required.
+3. **Kernel load**: reads the kernel image in 64-sector (32 KiB) chunks to a real-mode
+   buffer at `0x20000`, then copies each chunk to the staging area at `0x1000000` (16 MiB)
+   using unreal mode (`a32 rep movsd` with interrupts disabled). Unreal mode is re-entered
+   after every INT 13h call because the BIOS may reset cached descriptor limits. Reads
+   retry 3 times.
+4. **Protected mode**: loads a GDT (null, 32-bit code `0x08`, data `0x10`, 64-bit code
+   `0x18`) and enters 32-bit protected mode.
+5. **Paging**: builds 4-level page tables at `0x70000`–`0x73FFF` mapping the first 1 GiB
+   of physical memory twice with 2 MiB pages: identity (`PML4[0]`) and at the kernel VMA
+   (`PML4[511] → PDPT[510]`, i.e. `0xffffffff80000000`). Both mappings share one page
+   directory.
+6. **Long mode**: sets CR4.PAE, loads CR3, sets EFER.LME (MSR `0xC0000080` bit 8), enables
+   paging, and far-jumps to 64-bit code.
+7. **ELF load** (64-bit): validates the staged image (ELF magic, 64-bit, little-endian,
+   `EM_X86_64`) and for each `PT_LOAD` segment checks `p_filesz ≤ p_memsz`,
+   `p_paddr ≥ 0x100000`, and that the segment ends below the staging area; then copies
+   file bytes to `p_paddr` and zeroes BSS. The entry point must be ≥
+   `0xFFFFFF8000000000`.
+8. Jumps to the ELF entry point with `RDI` = physical address of the bootinfo block.
+
+Errors in 64-bit mode (no BIOS available) are reported white-on-red via the VGA text
+buffer at `0xB8000`.
+
+## Kernel entry state
+
+At `_start` (`kernel/arch/x86_64/entry.asm`):
+
+- CPU in 64-bit long mode, interrupts disabled, paging per step 5 above.
+- `RDI` = physical address of the bootinfo block (`0x6000`).
+- GDT is stage 2's; the kernel must install its own before relying on selectors.
+- No stack guarantee: the kernel entry stub installs its own 16 KiB stack.
+- All kernel `PT_LOAD` segments copied and BSS zeroed by the loader.
+
+## The bootinfo block
+
+Physical address `0x6000`, defined in `kernel/include/bootinfo.h`:
+
+```c
+struct e820_entry {          /* 24 bytes, packed */
+    uint64_t base, len;
+    uint32_t type;           /* 1 usable, 2 reserved, 3 ACPI reclaim, 4 NVS, 5 bad */
+    uint32_t attr;           /* ACPI 3.0 extended attributes */
+};
+
+struct bootinfo {            /* packed */
+    uint32_t magic;          /* 0x4E434C48 "HLCN" */
+    uint16_t version;        /* 1 */
+    uint8_t  boot_drive;     /* BIOS drive number */
+    uint8_t  reserved0;
+    uint32_t e820_count;     /* 1..64 */
+    uint32_t reserved1;
+    struct e820_entry e820[64];
+};
+```
+
+The kernel panics if the magic, version, or entry count is invalid. Reserved fields are
+zero in version 1; future versions may assign them.
+
+## Low-memory map used during boot
+
+| Physical range | Use |
+|---|---|
+| `0x6000` | bootinfo block |
+| `0x7C00` | stage 1 (stack grows down from here) |
+| `0x7E00` | stage 2 |
+| `0x20000`–`0x27FFF` | 32 KiB disk read buffer |
+| `0x70000`–`0x73FFF` | boot page tables (PML4, 2×PDPT, PD) |
+| `0x100000` (1 MiB) | kernel load address (linked physical base) |
+| `0x1000000` (16 MiB) | kernel ELF staging area |
+
+Everything below 1 MiB plus the staging area is scratch: once the kernel owns memory
+management it may reclaim all of it except the bootinfo block, which it must copy first.
+
+<div style="page-break-after: always"></div>
+
+# Memory Map
+
+## Physical memory during boot
+
+| Range | Owner | Use |
+|---|---|---|
+| `0x0000`–`0x04FF` | BIOS | IVT + BIOS data area (untouched) |
+| `0x0500` / `0x100500` | stage 2 | A20 wraparound test bytes (saved/restored) |
+| `0x6000`–`0x661F` | boot protocol | bootinfo block (16-byte header + 64×24-byte E820 entries) |
+| `0x7C00`–`0x7DFF` | stage 1 | MBR code; stack grows down from `0x7C00` |
+| `0x7E00`–… | stage 2 | loader code/data (≤ 127 sectors) |
+| `0x20000`–`0x27FFF` | stage 2 | 32 KiB INT 13h read buffer |
+| `0x70000`–`0x70FFF` | stage 2 | boot PML4 |
+| `0x71000`–`0x71FFF` | stage 2 | boot PDPT (low, identity) |
+| `0x72000`–`0x72FFF` | stage 2 | boot PDPT (high, kernel half) |
+| `0x73000`–`0x73FFF` | stage 2 | boot PD (512 × 2 MiB = 1 GiB) |
+| `0xB8000` | hardware | VGA text buffer |
+| `0x100000` (1 MiB)–… | kernel | kernel image (`.text .rodata .data .bss`), linked here |
+| `0x1000000` (16 MiB)–… | stage 2 | kernel ELF staging area |
+
+After the kernel owns memory management (Phase 2), everything in this table except the
+kernel image and hardware regions is reclaimable; the bootinfo block must be copied out
+first.
+
+## Virtual address space
+
+Two regimes exist, before and after `vmm_init()`.
+
+### During boot (stage 2's tables)
+
+Stage 2 maps the first **1 GiB** of physical memory with 2 MiB pages, twice: identity at
+`0` and at `KERNEL_VMA`. `hhdm_base` (see `memlayout.h`) starts at `KERNEL_VMA`, so
+`phys_to_virt()` works for physical addresses below `BOOT_MAPPED_LIMIT` (1 GiB) only.
+Early consumers (bootinfo validation, PMM construction, VMM table building) stay inside
+that window.
+
+### After `vmm_init()` (the kernel's tables)
+
+| Virtual range | Maps to | Attributes |
+|---|---|---|
+| `0` .. `0x00007fffffffffff` | *unmapped* | userspace-to-be; null page faults |
+| `HHDM_BASE = 0xffff800000000000` + `paddr` | all RAM + first 4 GiB (MMIO window) | 2 MiB global pages, NX; RAM write-back, non-RAM cache-disabled |
+| `KERNEL_VMA = 0xffffffff80000000` + `paddr` | kernel image only | 4 KiB global pages, W^X (below) |
+
+Kernel image protections (4 KiB granularity, boundaries page-aligned by the linker
+script, verified by boot selftests):
+
+```
+_text_start   .. _text_end     RX   (executable, read-only)
+_rodata_start .. _rodata_end   RO   (NX)
+_data_start   .. _data_end     RW   (NX; covers .data and .bss)
+```
+
+`vmm_init()` also enables `EFER.NXE`, `CR0.WP`, and `CR4.PGE`, flips `hhdm_base` to
+`HHDM_BASE` (the PMM re-derives its bitmap pointer at that moment via `pmm_rebase()`),
+and installs a page-fault handler that decodes the error code and CR2 before panicking.
+The boot identity map and the old 1 GiB alias are gone from that point; reserved E820
+ranges above 4 GiB (e.g. the 64-bit PCI hole) are deliberately not mapped.
+
+The frame allocator (`pmm`) is seeded from the E820 map minus the kernel image, low
+memory, and its own bitmap; see `kernel/mm/pmm.c` for the construction order.
+
+This document is updated in the same commit as any layout change.
+
+<div style="page-break-after: always"></div>
+
+# Threads and Scheduling
+
+Phase 3 gives the kernel preemptive multitasking: kernel threads with their own
+stacks, a round-robin scheduler driven by the timer tick, timed sleep, and
+pthread-style join. Userspace processes (Phase 4) will build their kernel-side
+execution on these threads.
+
+## Layering
+
+| Layer | File | Tested by |
+|---|---|---|
+| Policy (ready queue, sleep list) | `kernel/sched/sched_core.c` | host unit tests, ASan/UBSan |
+| Mechanism (stacks, switch, timer, blocking) | `kernel/sched/sched.c` | in-kernel selftests + QEMU markers |
+| Context switch | `kernel/arch/x86_64/ctx.asm` | in-kernel selftests |
+
+`sched_core.c` is pure list manipulation over `struct thread` and never touches
+hardware, locks, or allocation, so the identical code runs under sanitizers on
+the host (`tests/host/test_sched.c`), including a 20,000-round randomized
+stress run checked against a shadow model.
+
+## Thread model
+
+- Every thread is a kernel thread with a 16 KiB `kmalloc`'d stack (the boot
+  context is adopted as thread 0, "main", on the boot stack; guard pages come
+  with per-process address spaces in Phase 4).
+- States: `READY` (on the ready queue), `RUNNING` (at most one), `SLEEPING`
+  (on the wake-tick-sorted sleep list), `BLOCKED` (waiting in `thread_join`
+  or parked via `sched_block()`/`sched_wake()` — the primitive `wait4` blocks
+  on), `ZOMBIE` (exited, awaiting join).
+- Threads are joinable, pthread-style: each created thread must be passed to
+  `thread_join()` exactly once; join blocks until the thread exits, then frees
+  its stack and control block. The selftests assert the heap returns to its
+  pre-test object count, so leaks in this path cannot land.
+- Returning from the entry function is equivalent to calling `thread_exit()`.
+
+## Context switch
+
+A thread off the CPU is exactly its saved `rsp`. `ctx_switch(&old->rsp,
+new->rsp)` pushes the System V callee-saved registers (`rbp rbx r12-r15`) onto
+the outgoing stack, swaps stack pointers, pops the incoming thread's registers,
+and `ret`s. Caller-saved registers need no treatment: `ctx_switch` is an
+ordinary function call, so the compiler already saved what mattered.
+
+New threads get a hand-built frame whose return address is
+`thread_entry_trampoline` with `r12` = entry function and `r13` = argument.
+The trampoline is placed 8 bytes below the 16-byte-aligned stack top so `rsp`
+is 16-aligned at its call sites, as the ABI requires. It enables interrupts,
+calls `entry(arg)`, and falls into `thread_exit()`.
+
+## Preemption
+
+The 100 Hz PIT tick calls the scheduler's tick hook (registered via
+`timer_set_tick_hook`), which wakes due sleepers and flags `need_resched`
+whenever any thread is ready — the timeslice is one tick, 10 ms. The IRQ
+dispatcher performs the actual switch *after* sending EOI (`sched_preempt()`),
+so the in-service interrupt never blocks further ticks. The preempted thread's
+trapframe simply stays parked on its own kernel stack; when scheduled back in,
+it returns up through the interrupt path and `iretq` as if nothing happened.
+
+Wakeups from interrupt handlers get the same treatment: making a thread ready
+in interrupt context flags a reschedule that happens at IRQ exit, so a woken
+thread runs within the same tick, not after the current timeslice expires.
+
+## Invariants
+
+1. `schedule()` is entered with interrupts disabled — always (asserted).
+2. The running thread is never on the ready queue or the sleep list.
+3. The idle thread never blocks, sleeps, exits, or enters the ready queue; it
+   is the fallback when everyone else is blocked, and it `hlt`s.
+4. A thread is on at most one list at a time (`next` is the only link).
+5. A zombie's stack is freed only from `thread_join`, which can only run after
+   the zombie's final `ctx_switch` has left that stack for good.
+
+## Interrupt-off critical sections
+
+One CPU, so disabling interrupts is the kernel lock. With preemption, any
+state shared between threads needs it: the scheduler's own lists, the heap
+(`kmalloc`/`kfree`), the frame allocator, and `kprintf`'s output emission
+(formatting happens outside the critical section; only the console write is
+atomic, keeping log lines whole). `cpu_irq_save()`/`cpu_irq_restore()` nest
+correctly, so an allocator calling another allocator stays safe. These
+sections become real spinlocks when SMP arrives.
+
+## Proof of interleaving
+
+Every boot runs a scheduler selftest whose result prints to serial and is
+asserted by the QEMU integration test:
+
+```
+sched: online, round-robin, 10 ms timeslice
+selftest: sched interleave "abcabcabcabc"
+```
+
+Three workers each log their tag and yield, four rounds; FIFO round-robin makes
+the log a perfect rotation. The suite also proves timed sleep blocks for the
+requested ticks, that a spinning thread which never yields cannot monopolize
+the CPU (the sleeping main thread gets it back via preemption), and that join
+reclaims every byte.
+
+<div style="page-break-after: always"></div>
+
+# Userspace and System Calls
+
+Phase 4 brings ring 3; Phase 5 gives it files. This document covers user
+address spaces, the SYSCALL/SYSRET path, the ELF64 loader, the process model —
+fork, execve, wait4, exit over a host-tested process table — and the file
+descriptor layer over the VFS (Appendix J).
+
+## System call ABI
+
+The native ABI is **identical to the Linux x86_64 syscall convention**, on
+purpose: the Phase 7 Linux personality layer then shares one numbering, one
+register convention, and one error vocabulary with native code.
+
+| aspect | contract |
+|---|---|
+| entry | `syscall` instruction |
+| number | `rax` |
+| arguments | `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` |
+| return | `rax`; errors are `-errno` (see `kernel/include/errno.h`) |
+| clobbered | `rcx` (return RIP), `r11` (RFLAGS) — hardware behavior |
+| preserved | every other register — the entry stub saves and restores the full caller-saved set; callee-saved registers survive through the C ABI |
+| unimplemented | `-ENOSYS`, always |
+
+Implemented today (numbers from the Linux x86_64 table):
+
+| # | syscall | scope |
+|---|---|---|
+| 0 | `read(fd, buf, count)` | any open fd; console reads block until input, then short-read |
+| 1 | `write(fd, buf, count)` | any open fd; disk files are `-EBADF` until the 5d write path |
+| 2 | `open(path, flags)` | access mode + `O_DIRECTORY` only; disk opens for write are `-EROFS` |
+| 3 | `close(fd)` | drops the fd table's reference; last reference frees the description |
+| 5 | `fstat(fd, statbuf)` | the Linux x86_64 144-byte `struct stat` (`_Static_assert`ed) |
+| 8 | `lseek(fd, off, whence)` | SET/CUR/END on files and directories; `-ESPIPE` on the console |
+| 39 | `getpid()` | the calling process's pid |
+| 57 | `fork()` | full process clone (eager copy; COW later); child gets rax = 0 |
+| 59 | `execve(path, argv, envp)` | replace the image with the ELF at `path` on the filesystem; SysV argv/envp stack; fds survive |
+| 60 | `exit(status)` | zombie in the table, parent woken, every fd closed |
+| 61 | `wait4(pid, wstatus, 0, NULL)` | blocking reap of one child (pid > 0 exact, -1 any); Linux `WIFEXITED` status encoding |
+| 217 | `getdents64(fd, buf, count)` | real `linux_dirent64` records; directories synthesize `.` and `..` |
+
+The fd-backed syscalls dispatch through the VFS `struct file_ops` vtable; a
+`NULL` slot maps to the conventional errno (`write` on a read-only file
+`-EBADF`, `lseek` on the console `-ESPIPE`, `getdents64` on a regular file
+`-ENOTDIR`). The full open-file semantics live in Appendix J.
+
+Every user pointer is validated before use: the range must lie below
+`USER_VA_LIMIT` (`0x0000800000000000`, the canonical lower half) and every
+page it touches must be present **and** user-accessible (`PTE_US`) in the
+caller's address space. Anything else returns `-EFAULT` without being touched.
+
+## The entry path
+
+`syscall` does not switch stacks, so the entry stub
+(`kernel/arch/x86_64/syscall_entry.asm`) runs its first instructions on the
+*user* stack pointer with interrupts masked by SFMASK (`IF|TF|DF|AC`). It
+parks the user RSP, adopts the current thread's kernel stack from a global the
+scheduler maintains on every context switch (single CPU; `swapgs` + per-CPU
+state arrive with SMP), saves every caller-saved user register (the ABI
+promises they survive; the C dispatch would trash them), re-enables
+interrupts — syscalls may block or be preempted — and calls
+`syscall_dispatch()`. The return path disables interrupts, restores the
+saved registers and the user RSP/RIP/RFLAGS, and `sysret`s. Init asserts
+this contract at boot: it issues a syscall with sentinel values in all six
+argument registers and verifies them afterwards.
+
+MSR setup (`usermode.c`): `EFER.SCE`, `STAR` (selector layout in `gdt.h` was
+designed for SYSRET's `+8/+16` selector math back in Phase 2), `LSTAR` →
+entry stub, `SFMASK`.
+
+The entry stub's register save area *is* `struct syscall_frame` (layout
+asserted with `offsetof`): the complete user context, which is what makes
+fork a struct copy. All kernel→ring 3 entries go through
+`user_frame_enter(frame)` — an `iretq` with the frame's full register state.
+A process's first entry is simply a zeroed frame with `rip`/`rsp`/`rflags`
+set, so nothing of the kernel leaks into ring 3.
+
+## Address spaces
+
+`vmm_addrspace_create_user()` builds a PML4 whose upper half aliases the
+kernel PML4's entries 256–511: the kernel is mapped (so interrupts, syscalls,
+and the scheduler need no CR3 gymnastics) but inaccessible from ring 3 (no
+kernel mapping carries `PTE_US`). Consequence, enforced by convention: the
+kernel never adds *new top-level* PML4 entries after `vmm_init()` — all kernel
+mappings live under the HHDM and kernel-image slots populated there.
+
+The scheduler tracks an address space per thread (`NULL` = kernel). On a
+context switch it reloads CR3 only when the target differs from what is
+active, so pure kernel threads never pay for a TLB flush, and it always points
+`TSS.rsp0` and the syscall stack global at the incoming thread's kernel stack.
+
+User page permissions are real: code pages RX (no `PTE_W`), stack/data pages
+RW + `PTE_NX`, and the page-table walk propagates `PTE_US` through the
+intermediate levels while leaf entries decide the effective permission.
+
+## Program loading: ELF64
+
+Programs are statically linked ELF64 executables (`ET_EXEC`, `EM_X86_64`).
+Loading is split the same way as every other core/kernel pair in the tree:
+
+- **`elf64_validate()`** (`kernel/lib/elf64.c`) is a pure function over the
+  image bytes, compiled for the host and tested under ASan/UBSan with a
+  crafted well-formed executable plus one targeted mutation per rejection
+  path. It checks the identity fields (magic, class, endianness, version,
+  type, machine), the program header table bounds, and every `PT_LOAD`
+  segment: file ranges in bounds (overflow-safely), `filesz ≤ memsz`, the
+  vaddr range inside `[PAGE_SIZE, USER_VA_LIMIT)` (the null page is never
+  mappable), vaddr/offset page congruence, no two segments sharing a page,
+  no writable+executable segment, and an entry point inside an executable
+  segment's file-backed bytes. The contract: after `ELF64_OK`, every
+  arithmetic step the loader performs is overflow-free and in-bounds.
+- **`elf64_load()`** (`kernel/proc/elf_load.c`) materializes a validated
+  image: fresh zeroed frames per page (so `memsz > filesz` bss tails and
+  segment padding arrive zeroed), file bytes copied in, and leaf permissions
+  derived per segment — `PF_X` clears NX, `PF_W` sets writable, everything
+  else is read-only NX. Rejection reasons surface as `elf64_strerror()` text.
+
+`user/user.ld` links user programs at `0x400000` with three page-aligned
+`PT_LOAD` segments (text R+X, rodata R, data+bss RW) so the per-segment W^X
+policy is exercised by the very first binary. The ELF headers themselves are
+not mapped into user memory; the kernel parses them from the kernel-side
+buffer `vfs_read_file()` filled from disk.
+
+## The process model
+
+The process table itself is a pure state machine (`kernel/proc/proc_core.c`,
+host-tested): up to 64 processes, monotonically increasing pids starting at
+1 (init), parent links, `LIVE → ZOMBIE → free` lifecycle, and orphan
+reparenting to init on parent exit. The kernel wraps it
+(`kernel/proc/process.c`) with what a pure table cannot hold: the address
+space, the hosting kernel thread, the blocked waiter, and the process name.
+
+Each process also owns a **file descriptor table** (`FD_MAX` = 16 slots of
+`struct file *`). An fd is an index into it; the object it names is a VFS open
+file description, refcounted so `fork` can duplicate the table by pointer —
+parent and child share each description, offset included, per POSIX. `execve`
+leaves the table untouched (no close-on-exec flags yet — documented), and exit
+closes everything. Init starts with fds 0/1/2 all referencing one open of
+`/dev/console`.
+
+Every process is **hosted by a kernel thread**. The thread builds nothing
+itself — it receives a completed image (address space + start frame),
+binds to the address space (`sched_set_addrspace`), and enters ring 3 via
+`user_frame_enter`, never to return except through syscalls. This gives
+processes preemption, sleep/wake, and join for free from the Phase 3
+scheduler; the thread carries its process's pid.
+
+The lifecycle syscalls:
+
+- **`fork`** allocates a child pid, clones the address space eagerly
+  (`paging_user_clone`: every lower-half 4 KiB mapping copied to a fresh
+  frame, W/US/NX permissions preserved — COW comes later), copies the
+  parent's saved syscall frame with `rax = 0`, and launches a hosting
+  thread. The full-trapframe entry path is what makes this a struct copy.
+- **`execve`** copies the path and both string vectors out of user memory
+  first (bounded: 16 args, 128 bytes of strings, path ≤ 63), then builds the
+  **complete new image before touching the old one** — address space, ELF
+  segments, stack, argv/envp — so any failure (`-ENOENT`, `-ENOMEM`,
+  `-E2BIG`) returns with the caller unharmed. On success it swaps the
+  address space, reloads CR3, destroys the old space, and rewrites the saved
+  syscall frame so `sysret` lands at the new entry point. The image comes off
+  the filesystem: `vfs_read_file()` reads the whole ELF into a kernel buffer,
+  the loader materializes it, the buffer is freed.
+- **`exit`** marks the process a zombie holding its status, reparents its
+  children to init, wakes the parent if it is blocked in `wait4`, and ends
+  the hosting thread.
+- **`wait4`** finds a matching child (exact pid or `-1` for any): a zombie
+  is reaped — join the hosting thread, destroy the address space, free the
+  table slot, deliver the Linux wait status (`(code & 0xff) << 8` for a
+  normal exit, the signal number for a fault kill — `WIFEXITED` /
+  `WIFSIGNALED` semantics); otherwise the parent publishes itself as the
+  waiter and blocks. The check and the block happen in one interrupts-off
+  section, so a child exiting concurrently cannot slip through unnoticed.
+
+A hardware exception raised in ring 3 is never the kernel's problem: the
+trap dispatcher logs one diagnostic line (exception, `rip`, error code,
+`cr2` for page faults) and **kills the offending process** with the Linux
+signal for that exception (`#PF`/`#GP` → `SIGSEGV`, `#UD` → `SIGILL`,
+`#DE`/`#MF`/`#XM` → `SIGFPE`, ...), delivered to the parent through
+`wait4`. The kernel and every other process keep running. Only
+machine-level events (NMI, double fault, machine check) still panic, as
+does any fault taken in kernel mode — that is a kernel bug by definition.
+If init itself dies by signal, the kernel panics, Unix style.
+
+New images start with the System V ABI stack contract: `[argc, argv...,
+NULL, envp..., NULL, AT_NULL]` at a 16-byte-aligned `rsp`, string bytes
+packed in the top stack page. `user/crt0.asm` picks `argc`/`argv` from it
+and calls `main(argc, argv)`.
+
+```
+0x0000000000400000   .text    R+X
+0x0000000000401000   .rodata  R
+0x0000000000402000   .data + .bss  RW + NX
+0x00007FFFFFFFB000   stack, 4 pages RW + NX
+0x00007FFFFFFFF000   stack top; initial RSP just below, after argv/envp
+```
+
+## Init
+
+Init is a freestanding C program: `user/crt0.asm` plus `user/init.c`, with
+syscall wrappers in `user/syscall.h` and a tiny `user/ulib.h`. User code is
+compiled without SSE and without the red zone — the kernel does not save
+FPU/SSE state across context switches, and interrupts run on the current
+stack. The linked ELFs are installed at `/bin` on the graphfs image
+(`build/fs.img`, built by `tools/graphfs_mkfs.c`); boot reads `/bin/init`
+through the VFS and joins it:
+
+```
+user: launching init (/bin/init from disk, 13448 bytes)
+hello from ring 3
+hello from execve
+user: console open via /dev/console ok
+user: C init: .data .bss .rodata ok
+user: init exited (status 0)
+```
+
+Init doubles as the acceptance test for the loader, the ABI, the process
+model, and the whole VFS read side. Its exit status names the first failed
+check; 0 means all forty-seven passed: `write` returns the full length,
+`.bss` zero-filled, `.data` initialized and writable, `getpid`,
+`-ENOSYS`/`-EBADF`/`-EFAULT` error paths, all six argument registers
+surviving a syscall, the full process round trip — `fork` returns a fresh
+pid, the child `execve`s `/bin/hello` (which verifies its own argv arrived
+intact and exits 42), `wait4` returns that pid with status `42 << 8`, a
+second `wait4` returns `-ECHILD`, `execve` of an unknown path returns
+`-ENOENT` — fault isolation: a forked child that writes to a kernel address
+is killed with `SIGSEGV`, one that executes an illegal instruction with
+`SIGILL`, both observed through `wait4` while everything else keeps running —
+and the file surface: a known ELF opened and its magic read, `lseek` END/SET
+proven against `fstat`'s size, `/bin` walked with `getdents64` and required
+to hold exactly `.`, `..`, `init`, `hello`, `/dev/../bin/./hello` resolving
+through the normalizer, and every error contract probed (`-ENOENT`,
+`-ENOTDIR`, `-EISDIR`, `-EROFS`, `-EBADF` after close, `-ESPIPE` on the
+console). After init is reaped, the kernel asserts the process table is
+empty and that the physical frame count matches the pre-launch value: the
+whole fork/exec/wait cycle leaks nothing.
+
+## Known limits of this slice (by design, lifted in later slices)
+
+- Static `ET_EXEC` only; `ET_DYN`/interpreters are Phase 7 territory.
+- The root mount is read-only; `write` to disk files and the namespace
+  syscalls (`mkdir`, `unlink`, ...) arrive with slice 5d.
+- `FD_MAX` is 16, there is no `dup`/`dup2`, and no close-on-exec flags.
+- No `chdir`: every process's working directory is `/`, and relative paths
+  resolve from there (defined, not undefined).
+- `fork` copies eagerly; no copy-on-write yet.
+- `wait4` supports options 0 and a NULL rusage only; no `WNOHANG`, no
+  process groups. No signal *delivery* exists yet — signal numbers appear
+  only as fault-kill wait statuses.
+- No SMEP/SMAP yet; the kernel relies on paging permissions plus pointer
+  validation.
+- The kernel does not save FPU/SSE state, so user code is built `-mno-sse`
+  (enforced by `USER_CFLAGS`); lazy FPU switching comes later.
+
+<div style="page-break-after: always"></div>
+
+# Storage: PCI, virtio-blk, and the Block Layer
+
+Phase 5 gives the kernel a disk. This document covers the PCI bus scan, the
+VIRTIO 1.2 modern PCI transport, the virtio-blk driver, and the block layer
+that filesystems build on. The native filesystem itself (graphfs) has its
+own document: [graphfs.md](graphfs.md).
+
+## Topology
+
+The **boot disk** (kernel image) stays on the BIOS/INT13 path — the
+bootloader owns it and the kernel never touches it again. The **filesystem
+disk** (`build/fs.img`) is a second drive attached as a modern virtio-blk
+PCI device:
+
+```
+qemu ... -drive file=fs.img,format=raw,if=none,id=fsdisk \
+         -device virtio-blk-pci,drive=fsdisk,disable-legacy=on
+```
+
+`disable-legacy=on` makes QEMU expose the pure VIRTIO 1.x interface
+(device id `1af4:1042`); the driver does not implement the pre-1.0 legacy
+layout at all. virtio is not a shortcut: it is the industry-standard
+paravirtual device interface, implemented here against the VIRTIO 1.2
+specification. Bare-metal drivers (AHCI, NVMe) are additive later work
+behind the same block API — a stated requirement, since the OS will
+eventually be installed on real hardware.
+
+## PCI (`kernel/drivers/pci.c`)
+
+Configuration mechanism #1: the `0xCF8`/`0xCFC` port pair. `pci_init()`
+performs a flat scan of every bus/device/function — the BIOS POST has
+already assigned bus numbers and BARs, so everything answers at its final
+address — logging each function and recording them in a fixed table:
+
+```
+pci: 00:01.1 8086:7010 class 01.01     ← PIIX3 IDE
+pci: 00:04.0 1af4:1042 class 01.00     ← virtio-blk, modern
+pci: 7 functions
+```
+
+The API (`pci.h`) offers config-space accessors, a bounded capability-list
+walker, memory-BAR decoding (32- and 64-bit), and `pci_enable_device()`
+(memory decoding + bus mastering). Port-based config access is inherently
+x86; a future arch port swaps in ECAM behind the same header.
+
+## virtio transport (`kernel/drivers/virtio_pci.c`)
+
+The modern transport locates the device's register regions through
+vendor-specific PCI capabilities (VIRTIO 1.2 §4.1.4): common config,
+notify, and device config, each naming a BAR and offset. The regions are
+reached through the direct map (BARs sit below 4 GiB, which `vmm_init()`
+maps uncached); a BAR outside that window is rejected loudly.
+
+Bring-up follows §3.1.1 exactly: reset (bounded wait), ACKNOWLEDGE, DRIVER,
+feature negotiation — `VIRTIO_F_VERSION_1` is required, anything else is
+per-driver — FEATURES_OK (verified by reading it back), queue setup,
+DRIVER_OK. Any failure marks the device FAILED and leaves it quiescent.
+
+**Virtqueue.** The split-ring bookkeeping — descriptor chains, free-list
+recycling, available/used index math — is a pure module
+(`kernel/drivers/virtq_core.c`) with no kernel dependencies, unit-tested on
+the host under ASan/UBSan where the tests play the device's side of the
+protocol (`tests/host/test_virtq.c`). The kernel transport supplies what a
+pure module cannot: ring memory (two PMM frames per queue), physical
+addresses, memory barriers, and the notify doorbell. The core also defends
+against a misbehaving device: an out-of-range used id or a corrupted chain
+cannot loop or overrun the driver.
+
+v1 scope, stated: queue 0 only, no MSI-X, completions are polled. The
+kernel is single-CPU and its callers block on I/O anyway, so interrupt
+completion buys nothing yet; it arrives with async I/O.
+
+## virtio-blk (`kernel/drivers/virtio_blk.c`)
+
+Each request is the §5.2.6 three-descriptor chain: a 16-byte header
+(type + starting sector, device-readable), one 4 KiB data buffer, and a
+status byte (device-writable). The driver polls the used ring with a
+2-second timer deadline — a dead device yields `-EIO`, never a hang — and
+checks the device status byte before declaring success. Capacity is read
+from device config via the generation counter, translating the device's
+512-byte sectors to the kernel's 4 KiB blocks.
+
+## Block layer (`kernel/block/block.c`)
+
+Filesystems see an array of `BLOCK_SIZE` (4 KiB) blocks:
+
+- `block_read`/`block_write` go through a 64-entry LRU cache
+  (256 KiB of PMM frames). Writes are **write-through**: the cache never
+  holds dirty data, so a crash can only lose what the filesystem had not
+  yet ordered. `fsync`-driven flushing arrives with the write path (5d).
+- Driver buffers must be physically contiguous; the cache's frame-backed
+  entries satisfy this, and callers above the cache may pass any kernel
+  memory.
+- Concurrency contract: one caller at a time, asserted (`busy` guard).
+  I/O takes milliseconds, so callers must not hold interrupts off. The
+  contract is discharged by the VFS (Appendix J): every runtime disk path
+  goes through `vfs.c`, which serializes behind one sleeping mutex;
+  boot-time callers run before userspace exists.
+
+Boot runs a self-test that round-trips a pattern through the *raw driver
+ops* on the last block (a cached read-after-write would pass without
+touching hardware), restores the original contents, then verifies the
+cached path agrees:
+
+```
+virtio-blk: 16 MiB (32768 sectors), queue size 128
+block: virtio-blk, 16 MiB (4096 blocks of 4096), cache 256 KiB
+block: selftest passed (write/readback/restore)
+```
+
+A machine without a virtio-blk device still boots; storage-dependent
+features report the absence explicitly.
+
+## Known limits of this slice (lifted in later slices)
+
+- Single block device; no partitions (the fs disk is one filesystem).
+- Polled completion; no MSI-X, no async I/O, no request batching.
+- Write-through cache only; no dirty tracking until fsync lands (5d).
+- The block layer is single-caller by contract until the VFS adds a
+  sleeping lock (5c).
+
+<div style="page-break-after: always"></div>
+
+# The VFS: One Namespace, Open Files, and devfs
+
+Slice 5c gives processes files. This document is the contract for the virtual
+filesystem layer: mounts and path resolution, the open-file abstraction and
+per-process fd tables, the devfs device nodes, and the locking that lets every
+process reach the disk. Chapter 14 of the book is the reasoning behind these
+decisions; this is the reference. The layer below is graphfs (Appendix K) over
+the block layer (Appendix I); the layer above is the syscall surface
+(Appendix H).
+
+## The objects
+
+Three objects, defined in `kernel/include/vfs.h`:
+
+- **`struct file_ops`** — a five-slot vtable: `read`, `write`, `lseek`,
+  `fstat`, `getdents`. Every open object is fully described by one ops table
+  plus a node id; nothing above the filesystems switches on file type. A
+  `NULL` slot means "does not apply," and the syscall layer maps it to a fixed
+  errno — the error vocabulary is part of the interface:
+
+  | NULL slot | errno | rationale |
+  |---|---|---|
+  | `read` | `-EINVAL` | object is not readable |
+  | `write` | `-EBADF` | Linux's answer for a read-only description |
+  | `lseek` | `-ESPIPE` | the console is a stream, like a pipe |
+  | `getdents` | `-ENOTDIR` | only directories enumerate |
+  | `fstat` | — | mandatory; every ops table implements it |
+
+- **`struct file`** — an *open file description* (the POSIX term): ops
+  pointer, node id (graphfs node or devfs minor), byte **offset**, the `O_*`
+  flags from open, and a reference count. The description — offset included —
+  is shared by every fd that `fork` duplicated; it is freed when the last
+  reference closes. Refcount updates run under `cpu_irq_save` (single CPU).
+
+- **The mount table** — compile-time in v1: the graphfs on the registered
+  block device is `/` (`st_dev` 1), devfs is `/dev` (`st_dev` 2). Resolution
+  is a longest-prefix match on the canonical path; whatever no mount claims
+  belongs to the root filesystem. `/dev` also exists on the graphfs image as
+  an empty directory (`graphfs_mkfs --dir /dev`), a conventional mount point:
+  the mount covers it, but `ls /` still lists it.
+
+The **fd table** lives with the process (`struct process`, Appendix H):
+`FD_MAX` = 16 pointers. `fork` copies the pointers and takes a reference each;
+`execve` leaves the table alone (no close-on-exec flags yet); exit closes
+everything. Init starts with fds 0/1/2 all referencing one open of
+`/dev/console` — one description, three references.
+
+## Path normalization
+
+Every path entering the VFS is first normalized lexically by
+`vfs_path_norm()` (`kernel/fs/vfs_path.c` — pure C, host-tested under
+ASan/UBSan in `tests/host/test_vfs_path.c`):
+
+- Duplicate slashes collapse; `.` and empty components disappear; a trailing
+  slash is dropped; the output is always canonical and absolute.
+- `..` pops the previous component; popping above the root stays at the root
+  (POSIX: `/..` = `/`).
+- Relative paths resolve from `/` — there is no `chdir` yet, so every
+  process's working directory is *defined* to be `/`.
+- Errors: `-EINVAL` for NULL/empty input, `-ENAMETOOLONG` for a component
+  over `VFS_NAME_MAX` (255) or a result over `VFS_PATH_MAX - 1` (255) bytes.
+
+Filesystems therefore never see `.` or `..`; `gfs_resolve()` stays a plain
+component walk. **Lexical `..` is correct, not merely convenient, because the
+graphfs v1 namespace is a strict tree with no symlinks** — every directory has
+exactly one name, so dropping the last component of a canonical path *is* its
+parent. If symlinks ever land, normalization must move into the resolution
+walk; the comment at the top of `vfs_path.c` pins this dependency.
+
+## open, and what each object supports
+
+`vfs_open()` accepts the access mode plus `O_DIRECTORY`; any other flag
+(`O_CREAT`, ...) is `-EINVAL` until the write path. The root mount is
+read-only in 5c: opening a disk file `O_WRONLY`/`O_RDWR` is `-EROFS`, opening
+any directory for write is `-EISDIR`, and `O_DIRECTORY` on a file is
+`-ENOTDIR`.
+
+| object | read | write | lseek | getdents | fstat mode |
+|---|---|---|---|---|---|
+| graphfs file | yes | — (`-EBADF`) | SET/CUR/END | — (`-ENOTDIR`) | `S_IFREG` |
+| graphfs directory | `-EISDIR` | — | SET/CUR/END | yes | `S_IFDIR` |
+| `/dev` directory | `-EISDIR` | — | SET/CUR | yes | `S_IFDIR \| 0755` |
+| `/dev/console` | blocking | console | — (`-ESPIPE`) | — | `S_IFCHR \| 0666`, rdev 5:1 |
+
+Offsets may seek past EOF (reads there return 0); a negative resulting offset
+is `-EINVAL`. `fstat` fills the Linux x86_64 144-byte `struct stat`
+(`kernel/include/stat.h`, `_Static_assert`ed): `st_ino` is the graphfs node id
+or devfs minor, `st_blocks` counts 512-byte units, `st_blksize` is 4096.
+
+`getdents64` emits real `linux_dirent64` records (8-byte aligned, `d_type`
+filled). The file offset is a cursor, not a byte position: 0 is `.`, 1 is
+`..`, then one position per outgoing edge. Non-NAME edges (TAG/REF — the
+Phase 6 semantic layer) are not namespace entries and are skipped. A buffer
+too small for even one record returns `-EINVAL` (Linux semantics); end of
+directory returns 0. For `..` of the root, the root is its own parent, and
+`/dev`'s `..` is the graphfs root — the two-namespace seam a caller never
+sees.
+
+Error mapping from the graphfs core is centralized (`gfs_errno`): `GFS_ENOENT
+→ -ENOENT`, `GFS_ENOTDIR → -ENOTDIR`, `GFS_EISDIR → -EISDIR`,
+`GFS_ENAMETOOLONG → -ENAMETOOLONG`, `GFS_EROFS → -EROFS`, `GFS_EINVAL →
+-EINVAL`, and everything else — device failure, `GFS_EBADCRC`, detected
+corruption — is `-EIO`: the data cannot be served, whatever the cause.
+
+## devfs
+
+`kernel/fs/devfs.c` is deliberately tiny: the `/dev` directory (three static
+dirents: `.`, `..`, `console`) and `/dev/console`, the kernel console (serial
++ VGA) for output and the PS/2 keyboard for input. Node ids are devfs-local
+(1 = directory, 2 = console) under `st_dev` 2, so they never collide with
+graphfs inos. A path *through* a device (`/dev/console/x`) is `-ENOTDIR`, not
+`-ENOENT`.
+
+Console reads are terminal-style: **block until at least one character is
+buffered, then return what is there** (a short read). The lost-wakeup race —
+keyboard interrupt firing between "buffer empty" and "sleep" — is closed the
+same way `wait4` closes it: the reader publishes itself and blocks inside one
+interrupts-off section, and the keyboard IRQ handler wakes the published
+reader through a one-line notify hook (`keyboard_set_notify`). A `read_lock`
+mutex serializes concurrent readers so the single waiter slot suffices.
+
+## Locking
+
+The kernel's first sleeping lock (`kernel/sched/mutex.c`, `struct mutex`)
+exists because disk I/O takes milliseconds with interrupts on, and after 5c
+every process can reach the disk. Semantics:
+
+- Contenders queue FIFO and block at scheduler level (no spinning); the
+  waiter queue reuses `thread->next`, which a blocked thread is provably not
+  using.
+- `mutex_unlock` **hands the lock to the oldest waiter** before waking it —
+  the lock is never observably free while anyone queues, so arrivals cannot
+  barge past sleepers: FIFO fairness and starvation-freedom by construction.
+- Thread context only (never an IRQ handler), non-recursive (relock by the
+  owner asserts), unlock only by the owner. `mutex_held()` backs assertions.
+
+One global `fs_lock` inside `vfs.c` serializes every graphfs core call and
+every graphfs file-offset update — the `struct gfs` scratch buffers are
+single-caller by contract. It is held for the duration of one operation,
+never across a return to userspace. This lock also discharges the block
+layer's documented "one caller at a time" rule for all runtime disk paths
+(Appendix I); boot-time callers (`block_selftest`, the mount) run before
+userspace exists. Coarse by design: one disk, polled I/O — a per-filesystem
+lock buys nothing until there is concurrency to win back.
+
+## exec from disk
+
+`vfs_read_file(path, &buf, &size)` resolves a path to a DATA node and reads
+the whole file into a fresh kmalloc buffer (empty files yield a 1-byte buffer
+and size 0; a directory is `-EISDIR`). `process_execve()` and
+`process_run_init()` load ELF images through it — the Phase 4 built-in program
+table and the embedded `kernel/user_blob.asm` blob are deleted. The boot
+marker proves it:
+
+```
+vfs: graphfs root mounted ro (gen 11, 4081/4096 blocks free, 1018/1024 nodes free)
+vfs: devfs at /dev (console)
+user: launching init (/bin/init from disk, 13448 bytes)
+```
+
+## Verification
+
+- `vfs_path_norm` is host-tested exhaustively (canonical forms, `..` at every
+  position, both `-ENAMETOOLONG` causes, `-EINVAL`).
+- Init's acceptance suite (Appendix H) exercises the whole read surface from
+  ring 3 — every syscall, every error contract, `getdents64` against the known
+  image manifest, `/dev/../bin/./hello` through the normalizer — and the boot
+  integration test asserts the markers and `status 0`.
+- `graphfs_fsck` runs against `fs.img` in `make check`, so the image the
+  kernel mounts is independently verified.
+
+## Known limits of this slice (by design, lifted in later slices)
+
+- The root mount is read-only; `write`, `mkdir`, `link`, `unlink`, `rename`,
+  `fsync` and remount-writable are slice 5d.
+- Mounts are compile-time; a `mount(2)` syscall is far future.
+- No `chdir`/cwd, no `dup`/`dup2`, no `O_CLOEXEC`, `FD_MAX` = 16.
+- One global filesystem lock; revisit when I/O stops being polled (or SMP).
+- Lexical `..` normalization is valid only while the namespace is a strict
+  tree with no symlinks (graphfs v1 policy).
+- One console, one waiter slot; concurrent readers serialize.
+
+<div style="page-break-after: always"></div>
+
+# graphfs: The Native Property-Graph Filesystem
+
+graphfs is the from-scratch native filesystem for this OS. It is not a clone
+of ext2/FFS: on disk, everything is either a **node** (content + metadata) or
+a **typed, named edge** between two nodes. The POSIX namespace is one edge
+type layered on that graph — a "directory" is just a node whose outgoing
+`NAME` edges are its entries — which leaves `TAG` and `REF` edges as a
+first-class, format-stable substrate for the Phase 6 AI layer (provenance,
+semantic links) with no on-disk change required.
+
+The design is copy-on-write and self-checksumming, in the ZFS/APFS mould.
+This document is **authoritative for the on-disk format (v1)**; the header
+[`kernel/include/graphfs_core.h`](../kernel/include/graphfs_core.h) is the
+authoritative API.
+
+## Design principles
+
+- **Copy-on-write, never overwrite.** A change writes fresh blocks and is
+  made visible by a single atomic superblock write. A power loss either
+  lands before that write (the change never happened) or after it (the change
+  is whole). There is no journal and no repair-on-boot fsck — the on-disk
+  image is *always* structurally consistent.
+- **Self-validating tree.** Every metadata block is covered by a crc32c
+  stored in the *pointer that reaches it*, not in the block itself (a
+  `struct gfs_bp` = `{ phys, crc }`). The superblock, having no parent,
+  checksums itself. Silent media corruption is detected on read, not served.
+  v1 checksums all metadata; data-block checksums are a documented later
+  extension (as btrfs shipped incrementally).
+- **Two of everything live-critical.** Two superblock slots and two
+  allocation-bitmap copies are selected by `generation & 1`, so a commit
+  never writes the currently-live pair. Mount takes the valid superblock with
+  the highest generation.
+- **A pure core.** [`kernel/fs/graphfs_core.c`](../kernel/fs/graphfs_core.c)
+  is plain C over an abstract block-device callback (`struct gfs_ops`), with
+  no kernel dependencies and no dynamic allocation — block scratch lives in
+  `struct gfs`; the writable allocator and fsck take caller-supplied buffers.
+  The identical code compiles into the kernel, the host `mkfs`/`fsck` tools,
+  and the ASan/UBSan host test suite. **One caller at a time per `struct
+  gfs`** (a VFS sleeping lock will serialize this in 5c).
+
+All integers are little-endian. Node `0` is the reserved null id; node `1`
+(`GFS_ROOT_NODE`) is the root `NAMESPACE` node.
+
+## Disk layout
+
+Blocks are 4 KiB (`GFS_BLOCK_SIZE`). A freshly made filesystem lays out a
+fixed prefix, then a copy-on-write region that grows on demand:
+
+```
+LBA 0            superblock slot 0        (holds even generations)
+LBA 1            superblock slot 1        (holds odd generations)
+LBA 2            ┐
+   ...           ├ allocation bitmap, copy 0   (bitmap_blocks long)
+LBA 2+B-1        ┘
+LBA 2+B          ┐
+   ...           ├ allocation bitmap, copy 1   (bitmap_blocks long)
+LBA 2+2B-1       ┘
+LBA 2+2B         node-map block           ┐ "data_first": the CoW region.
+LBA 2+2B+1       root node-table block     │ mkfs seeds these two; every
+   ...           edge blocks, node-table   │ later block is bitmap-allocated
+   ...           blocks, file extents ...  ┘ on demand.
+```
+
+`B = bitmap_blocks = ceil(ceil(total_blocks/8) / 4096)`. The bitmap covers
+*every* block including itself and the superblocks; the fixed-prefix blocks
+are marked used at mkfs time. `data_first() = 2 + 2*bitmap_blocks` is the
+first allocatable LBA, and the block allocator only ever hands out blocks
+at or above it.
+
+### Superblock (`SB_*` offsets, LBA 0 and 1)
+
+Both slots share one format; the live one is `generation & 1`.
+
+| Offset | Size | Field | Notes |
+|-------:|-----:|-------|-------|
+| 0  | 8 | magic          | `GFS_SB_MAGIC` (`"HRGRHFS1"`) |
+| 8  | 4 | version        | `GFS_VERSION` = 1 |
+| 12 | 4 | block_size     | 4096 |
+| 16 | 4 | crc32c         | over the whole block with this field zeroed |
+| 24 | 8 | generation     | monotonic; selects slot and bitmap copy |
+| 32 | 8 | total_blocks   | device size in 4 KiB blocks |
+| 40 | 8 | node_count     | table capacity, ≤ `GFS_MAX_NODES` (4096) |
+| 48 | 8 | root_node      | always `1` |
+| 56 | 8 | bitmap_start   | always `2` |
+| 64 | 8 | bitmap_blocks  | length of one bitmap copy |
+| 72 | 4 | bitmap_crc     | crc32c over the live bitmap copy |
+| 80 | 8 | nodemap_phys   | LBA of the node-map block |
+| 88 | 4 | nodemap_crc    | crc32c of the node-map block |
+| 96 | 8 | free_blocks    | cached accounting |
+| 104| 8 | free_nodes     | cached accounting |
+
+Mount reads both slots, keeps the valid one with the highest generation,
+then re-checks structural invariants beyond the checksum (`node_count ≥ 2`,
+`root_node == 1`, `bitmap_start == 2`, node-map inside the data region, the
+whole prefix fitting inside `total_blocks`). Any failure is `GFS_EBADFS`.
+
+### Node map and node table
+
+Nodes are 256-byte records, 16 per block (`GFS_NODES_PER_BLOCK`). The
+**node-map** block is one 4 KiB block of 16-byte checksummed pointers
+(`{ phys:8, crc:8-as-4 }`, `MP_SIZE` = 16), so at most 256 table blocks →
+**4096 node ids** (`GFS_MAX_NODES`). Node `id` lives in table block
+`map[id / 16]`, record `id % 16`.
+
+Node record (`ND_*` offsets, 256 bytes):
+
+| Offset | Size | Field | Notes |
+|-------:|-----:|-------|-------|
+| 0  | 4  | type       | `FREE` (0) / `NAMESPACE` (1) / `DATA` (2) |
+| 4  | 4  | mode       | POSIX mode bits |
+| 8  | 8  | size       | file length in bytes (DATA) |
+| 16 | 4  | nlink      | incoming `NAME` edges |
+| 20 | 4  | n_extents  | used inline extent runs |
+| 24 | 8  | edge_count | outgoing edges, all types |
+| 32 | 8  | parent     | `NAMESPACE`: its single parent node id |
+| 40 | 8  | edge_phys  | first edge block (checksummed pointer…) |
+| 48 | 4  | edge_crc   | …crc of that edge block |
+| 56 | 8×24 | extents  | `GFS_INLINE_EXTENTS` = 8 runs |
+
+An **extent** is `{ logical:8, phys:8, len:8 }` (`EXT_SIZE` = 24) — a run of
+`len` contiguous blocks. v1 has no extent tree, so a file is at most 8 runs
+(`GFS_EFRAG` past that); each run is up to 2³²−1 blocks, so the practical
+cap is fragmentation, not size. The current writable path additionally caps a
+single file at `GFS_MAX_FILE_BLOCKS` (512 blocks = 2 MiB).
+
+### Edge blocks
+
+Outgoing edges hang off a node in a singly-linked chain of edge blocks. Each
+block is a 24-byte header + 14 fixed 272-byte records (`GFS_EDGES_PER_BLOCK`):
+
+- Header (`EB_*`): `magic` (`"GDGE"`), `count`, and a checksummed
+  `{ next_phys, next_crc }` pointer to the continuation block.
+- Record (`ER_*`, 272 bytes): `type:4`, `namelen:4`, `target:8`, and a
+  `name` of up to `GFS_NAME_MAX` = 255 bytes.
+
+Edge types: `NAME` (1) builds the POSIX tree; `TAG` (2) and `REF` (3) are
+valid on disk today but ignored by path resolution — reserved for the Phase 6
+semantic layer.
+
+## Namespace policy (v1)
+
+This is a *link-time policy*, not a format limitation:
+
+- A **`NAMESPACE`** node has exactly one incoming `NAME` edge — a single
+  parent. So `..` is a single stored field, and directory cycles are
+  impossible. A second `NAME` edge onto a namespace is `GFS_EMANYPARENTS`.
+- A **`DATA`** node may have any number of incoming `NAME` edges: hard links.
+  Unlinking to `nlink == 0` frees the node and its blocks.
+- `gfs_unlink` on a non-empty namespace is `GFS_ENOTEMPTY`.
+
+`.` and `..` are the VFS's concern; the core's `gfs_resolve` walks plain path
+components only. Multi-parent namespaces are a documented later extension.
+
+## The write transaction
+
+Writable mounts carry two allocator bitmaps carved from the caller's work
+buffer (`gfs_mount_work_size` = `2 * ceil(total_blocks/8)` bytes):
+
+- **`committed_bm`** — the live on-disk allocation state.
+- **`working_bm`** — the current transaction's view.
+
+Allocation draws only from blocks free in **both** bitmaps, so a block freed
+this transaction — still reachable through the one-generation fallback
+superblock — is never reused until the transaction commits. Each mutating
+call (`gfs_node_create`, `gfs_link`, `gfs_unlink`, `gfs_write`) is its own
+transaction: it CoWs the metadata it touches up to the node map, writes the
+inactive bitmap copy and inactive superblock slot at `generation + 1`, and
+returns only once that superblock write lands. There is no partial write on
+`GFS_ENOSPC`.
+
+## Tools and testing
+
+Because the core is pure, the host tools are thin drivers over the exact code
+the kernel mounts — the format has a single implementation:
+
+- [`tools/graphfs_mkfs.c`](../tools/graphfs_mkfs.c) — `graphfs_mkfs --out
+  img --size-mib N [/path=host_file ...]` makes a filesystem and installs
+  host files at absolute paths, creating intermediate namespaces. The build
+  uses it to lay `/bin/init` and `/bin/hello` onto `build/fs.img`.
+- [`tools/graphfs_fsck.c`](../tools/graphfs_fsck.c) — `graphfs_fsck img`
+  runs `gfs_fsck` over the image. Since a healthy CoW+checksummed image
+  always passes, a failure means a core bug or media corruption. `make
+  check-fsck` gates the freshly built image; the 5d crash-consistency gate
+  will run the same check after boot.
+
+Three test levels cover the format:
+
+- **Host unit tests** — [`tests/host/test_graphfs.c`](../tests/host/test_graphfs.c),
+  built into `make check-host` under ASan/UBSan against an in-memory device.
+- **fsck gate** — `make check-fsck`, above.
+- **Boot integration** — the kernel mounts `build/fs.img` over virtio-blk
+  during `make check-boot` (read path in 5c).
+
+## v1 limits (carried, by design)
+
+- Metadata-only checksums (no data-block checksums yet).
+- 8 inline extents per file, 512-block (2 MiB) max file, 4096 nodes.
+- Single-parent namespaces; one caller at a time per handle.
+- No extent tree, no snapshots surfaced, no compression.
+
+Each is a documented future extension, not a shortcut: the CoW +
+checksummed-pointer format was chosen so these can be added without breaking
+the on-disk layout.
+
+<div style="page-break-after: always"></div>
+
+# Testing
+
+`make check` is the gate for every commit. It runs two automated suites; a third level
+(in-kernel self-tests) executes inside the second. All three accumulate over the life of
+the project so regressions in earlier phases are caught forever.
+
+## Level 1 — host unit tests (`make check-host`)
+
+Arch-neutral kernel code is compiled **for macOS** and unit-tested under
+`-fsanitize=address,undefined -fno-sanitize-recover=all`. This gives the kernel's core
+logic the scrutiny of real sanitizers, which cannot run in freestanding kernel builds.
+
+Mechanics (`Makefile`, "host tests" section):
+
+- The kernel sources under test (`kernel/lib/string.c`, `kernel/lib/fmt.c`) are compiled
+  with their public symbols renamed (`-Dmemcpy=hl_memcpy`, …) so they can never collide
+  with libc or the sanitizer runtime. Test sources get the same renames, so a plain
+  `memcpy(...)` call in a test resolves to the kernel implementation under test.
+- `-fno-builtin -D_FORTIFY_SOURCE=0` stops the host compiler from replacing or wrapping
+  the calls being tested.
+- The framework (`tests/host/test.h`) registers tests with constructor attributes;
+  assertion failures are reported with file/line and fail the run without aborting it,
+  so one run reports every failure.
+
+Adding a test: create/extend a `tests/host/test_*.c` file, add it (and any new kernel
+source) to `HOST_TEST_SRCS` in the Makefile. Any new arch-neutral kernel module (an
+allocator, a path resolver, an ELF parser) must arrive with host unit tests.
+
+## Level 2 — in-kernel self-tests
+
+`kernel/selftest.c` runs a boot-time assertion suite over the freestanding library as
+compiled by the *real* kernel toolchain (`--target=x86_64-elf`, `-mcmodel=kernel`,
+no SSE). This catches codegen- and environment-specific breakage the host build cannot.
+On success it prints:
+
+```
+selftest: passed (N assertions)
+```
+
+A failed check panics, which the integration harness detects. Self-tests are cheap by
+design (they run on every boot) — heavy stress tests belong at level 1 or behind a
+dedicated integration scenario.
+
+## Level 3 — QEMU integration test (`make check-boot`)
+
+`tests/run_qemu.py` boots the actual disk image headless:
+
+```
+qemu-system-x86_64 -m 256M -drive file=disk.img,format=raw \
+    -serial stdio -display none -monitor none -no-reboot
+```
+
+It asserts that the expected markers appear on the serial console **in order** —
+the authoritative list is `PASS_MARKERS` in `tests/run_qemu.py`, one marker per
+proven subsystem, from the banner through memory, scheduling, the in-kernel
+self-tests, and the ring 3 round trip (`hello from ring 3` is printed by user
+code) to `boot: complete`.
+
+and fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on a 30 s
+timeout. On failure the full serial transcript is printed. The bootloader and kernel are
+written so that every fatal path emits one of the failure patterns — a hang without
+output is the only failure mode the harness can attribute solely to a timeout.
+
+As the OS grows, new integration scenarios add markers (and eventually scripted input via
+the QEMU monitor); existing markers are never removed, only extended.
+
+## Static quality gates
+
+- `make format-check` — clang-format compliance for all C sources/headers (`.clang-format`
+  in repo root; LLVM style, 4-space indent, 100 columns).
+- `make tidy` — clang-tidy over the kernel with the real kernel flags.
+- `-Wall -Wextra -Werror` on every compile, host and target.
+
+## Policy
+
+- `make check` must pass before every commit.
+- A bug fix lands with a test that failed before the fix.
+- A feature is not done until it is covered at the appropriate level(s): pure logic at
+  level 1, boot-visible behavior at level 3, invariants at level 2.
 
 <div style="page-break-after: always"></div>

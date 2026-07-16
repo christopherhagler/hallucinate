@@ -1,4 +1,4 @@
-# Chapter 15 — How an OS Actually Gets Built: Slices, Gates, and the Definition of Done
+# Chapter 16 — How an OS Actually Gets Built: Slices, Gates, and the Definition of Done
 
 Every OS book — this one included, until now — presents subsystems in their
 finished form, ordered by dependency: memory before scheduling, scheduling
@@ -15,7 +15,7 @@ one of them ending with `make check` green, every message recording what
 landed and what proved it. This chapter reads that ledger as what it is —
 a decision journal — and extracts the sequencing discipline from it.
 
-## 15.1 The ledger
+## 16.1 The ledger
 
 Read down this table slowly; the order itself is the curriculum.
 
@@ -47,9 +47,9 @@ gates first, library before bootloader, harness immediately after first
 boot, docs before the second phase, a bug-fix slice in the middle of Phase
 4\. Third pass: notice the right-hand column is never empty (except the
 docs commit — whose artifact *is* the proof). That column is the subject of
-§15.4.
+§16.4.
 
-## 15.2 The net went up before the wire
+## 16.2 The net went up before the wire
 
 The single most instructive fact in the ledger is commit 2. Before there
 was a bootloader — before this project could execute *anything* on the
@@ -71,7 +71,7 @@ image headless and asserts its output. From that moment forward, *nothing
 was ever demonstrated by hand again.* Every subsequent row in the ledger
 inherits an automated definition of "still works." The cost of the harness
 was one commit; the return is that eighteen commits of accumulated behavior
-are re-proven on every `make check` forever (Chapter 14's ratchet, seen
+are re-proven on every `make check` forever (Chapter 15's ratchet, seen
 from the other end: the ratchet had to be *installed early* to be worth
 anything).
 
@@ -80,7 +80,7 @@ The boot protocol was written down as a versioned contract at the moment
 exactly two programs depended on it and both were fresh in mind. Contracts
 are cheapest to write at the boundary where they were just negotiated.
 
-## 15.3 Vertical slices, and the smallest observable win
+## 16.3 Vertical slices, and the smallest observable win
 
 Look at how Phase 4 — userspace — is cut. A lesser plan says "implement
 processes": ELF loading, fork, exec, wait, fault handling, all of it, then
@@ -125,7 +125,7 @@ a toy; it is a scope decision of professional precision — small enough that
 ring-transition bugs have nowhere to hide, real enough that the marker it
 prints is asserted forever after.
 
-## 15.4 The definition of done, in the authors' own hand
+## 16.4 The definition of done, in the authors' own hand
 
 Read the closing lines of the ledger's commit messages, because they are a
 definition of "done" stated nineteen times:
@@ -139,7 +139,7 @@ definition of "done" stated nineteen times:
 > "Docs updated ... Version 0.4.1. Phase 4 complete."
 
 Four ingredients recur. **Proof at the right level** — pure logic cites host
-assertions, boot-visible behavior cites markers (Chapter 14 §14.4's rule 3,
+assertions, boot-visible behavior cites markers (Chapter 15 §15.4's rule 3,
 applied per commit, not per release). **Proof of the proof** — commit 17
 did not just add a test; it broke the fix on purpose and recorded that the
 test fails, because a test you have never seen fail proves nothing.
@@ -157,7 +157,7 @@ is not just ordering the features; it is *granting hardening the same
 slice-level dignity as features*, at the moment the debt is found, not "in
 a cleanup pass later" that history shows never comes.
 
-## 15.5 Changing your mind is a slice, too
+## 16.5 Changing your mind is a slice, too
 
 Commit 18 opens with something you will almost never see preserved:
 "The direction for this phase changed by decision: the native filesystem
@@ -176,12 +176,12 @@ substrate, Chapter 13). What the ledger teaches is not *that* plans change
 - **The displaced work was re-scoped, not deleted.** ext2 moved to Phase 7
   with a stated role. A plan is a priority queue, not a promise.
 - **The decision was recorded where the code landed** — first line of the
-  commit, plus a design doc (`docs/storage.md`) written before the slice.
+  commit, plus a design doc (now Appendix I) written before the slice.
   Two years from now, "why graphfs and not ext2" has an answer in `git log`
   instead of in someone's departed memory. (Chapter 0's advice to read real
   kernels' changelogs is this same channel, consumed from the other side.)
 
-## 15.6 Hooks, not half-features
+## 16.6 Hooks, not half-features
 
 Sequencing has a paradox: you must not build ahead (complete-or-absent,
 Chapter 1 §1.3), yet the ledger is full of Phase-2 decisions that Phase-4
@@ -203,7 +203,7 @@ carry; an implementation built for tomorrow is a liability you debug.
 *not* built early, precisely because it is an implementation, not an
 interface.)
 
-## 15.7 Scoping your own next slice
+## 16.7 Scoping your own next slice
 
 Distilled from the ledger, the questions to answer — in writing, before the
 first line of code — when you cut your next slice on your own kernel:
@@ -220,15 +220,15 @@ first line of code — when you cut your next slice on your own kernel:
    a deliverable, not an omission.
 5. **What does the layer below have to promise?** If the promise is not
    already written down, writing it down is part of *this* slice — that is
-   how the boot protocol and `docs/userspace.md` came to exist.
+   how the boot protocol (Appendix E) and the syscall ABI contract (Appendix H) came to exist.
 6. **What would prove a regression?** The marker or test this slice adds is
-   permanent (Chapter 14 §14.2); name what it will catch.
+   permanent (Chapter 15 §15.2); name what it will catch.
 
 Answer those six and the slice plans itself. Most of what looks like
 engineering judgment in the ledger is these questions, asked every time,
 answered honestly.
 
-## 15.8 The transferable lessons
+## 16.8 The transferable lessons
 
 - **Sequence so that every step's failure is debuggable with the tools of
   the previous step.** Library under sanitizers, then bootloader with

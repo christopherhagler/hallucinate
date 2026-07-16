@@ -21,7 +21,7 @@ manage the flow that was already running. (Recall `entry.asm` marked
 `kstack_top` global "the scheduler adopts this as thread 0's stack" — this is the
 payoff.)
 
-The states a thread moves through (`docs/scheduling.md`):
+The states a thread moves through (Appendix G):
 
 - **READY** — runnable, sitting on the ready queue.
 - **RUNNING** — on the CPU; at most one at a time.

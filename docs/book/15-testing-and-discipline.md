@@ -1,4 +1,4 @@
-# Chapter 14 — Testing and Professional Discipline
+# Chapter 15 — Testing and Professional Discipline
 
 Every subsystem chapter ended with the machine proving something on every boot.
 This chapter steps back and treats that as the subject in its own right, because
@@ -9,10 +9,10 @@ anyway is a test architecture that makes correctness *cumulative*: every propert
 you establish stays established forever. If you internalize one chapter's *method*
 rather than its facts, make it this one.
 
-## 14.1 Three levels, three kinds of truth
+## 15.1 Three levels, three kinds of truth
 
 `make check` is the gate for every commit, and it runs three levels of testing
-that catch three genuinely different classes of bug (`docs/testing.md`).
+that catch three genuinely different classes of bug (Appendix L).
 
 **Level 1 — host unit tests, under sanitizers.** The arch-neutral *pure cores*
 (`string.c`, `fmt.c`, `pmm_core.c`, `heap_core.c`, `sched_core.c`, `elf64.c`,
@@ -61,7 +61,7 @@ Three levels, three truths: **logic** (level 1, sanitized), **codegen/environmen
 (level 2, real toolchain), **integration** (level 3, real boot). A bug lives in
 exactly one of those categories, and the architecture has a net under each.
 
-## 14.2 Markers as an append-only ledger of proven behavior
+## 15.2 Markers as an append-only ledger of proven behavior
 
 The integration test keys on serial-console markers, and the governing rule is:
 **existing markers are never removed, only added to.** Each marker is a permanent
@@ -77,7 +77,7 @@ generalizes far beyond kernels: make your regression suite an **append-only ledg
 of things that once worked**, and never delete an assertion because the feature it
 covers is "old and stable" — old and stable is exactly what silently breaks.
 
-## 14.3 Design your failures to be loud and machine-detectable
+## 15.3 Design your failures to be loud and machine-detectable
 
 A test harness can only catch failures it can *see*. This project's bootloader and
 kernel are written so that **every fatal path emits a detectable pattern** — `ERR:`
@@ -95,9 +95,9 @@ straight back to Chapter 1's complete-or-absent — an explicit `-ENOSYS`, a
 failure impossible to miss.** Code that fails loudly is code you can build a robot
 around; code that fails silently is code you have to babysit forever.
 
-## 14.4 The policy that ties it together
+## 15.4 The policy that ties it together
 
-Three rules govern the whole project (`docs/testing.md`), and they are worth
+Three rules govern the whole project (Appendix L), and they are worth
 adopting verbatim:
 
 1. **`make check` must pass before every commit.** The gate is not advisory. Green
@@ -118,7 +118,7 @@ the real kernel flags). These are cheap, automatic, and non-negotiable — the p
 of a mechanical gate is that it removes an entire category of judgment call and
 bikeshedding from every code review.
 
-## 14.5 The design doc: deciding on paper, where changing your mind is free
+## 15.5 The design doc: deciding on paper, where changing your mind is free
 
 There is a second discipline running alongside the tests, easy to miss
 because its artifacts look like documentation: **every subsystem was
@@ -128,7 +128,7 @@ the memory map, scheduling, userspace, storage, graphfs, the test strategy
 itself — and the commit ledger shows them landing *with* their subsystems,
 then updated in the same commit as every change ("Docs updated ... Version
 0.4.1"). This is a skill no OS book teaches, so learn it from the artifacts:
-open `docs/scheduling.md` and read its section list as a template —
+open Appendix G and read its section list as a template —
 
 1. **Layering** — what sits above and below, and which direction calls flow.
 2. **The model** — the states and structures, in plain declarative sentences.
@@ -151,14 +151,14 @@ once meant to be. A design doc that can drift from its code is worse than
 none, which is exactly why "docs updated" appears in the ledger next to
 every feature — same commit, same review, same gate. And when a document
 describes an interface two programs must agree on, it gets a version:
-`docs/boot-protocol.md` is "boot protocol v1," a numbered contract between
+Appendix E is "boot protocol v1," a numbered contract between
 loader and kernel (Chapter 3 §3.4). Comments hold the local, load-bearing
 constraint at the line that needs it; design docs hold the shape of the
 subsystem; commit messages hold the change and its proof. Three channels,
 three jobs — a codebase that uses all three deliberately is one you can
 join, or return to after a year, without an oral tradition.
 
-## 14.6 Why this is the chapter that matters most
+## 15.6 Why this is the chapter that matters most
 
 Here is the honest truth about building something this large and unforgiving: you
 will not write it correctly the first time. Nobody does. The bootloader's A20
@@ -180,7 +180,7 @@ Master this and everything else in the book becomes *achievable*, because you no
 longer need to be perfect — you need to be rigorous, and rigor is a system you
 build, not a talent you are born with.
 
-## 14.7 The transferable lessons
+## 15.7 The transferable lessons
 
 - **Test at three levels for three kinds of bug:** sanitized host tests for
   logic, in-kernel self-tests for codegen/environment, integration boot for the

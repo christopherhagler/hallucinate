@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mkimage - assemble and validate the Hallucinate OS disk image.
 
-Disk layout (see docs/boot-protocol.md):
+Disk layout (see docs/book/appendix-e-boot-protocol.md):
 
     LBA 0                stage 1 (MBR, 512 bytes)
     LBA 1..N             stage 2, sector-padded (N <= 127)

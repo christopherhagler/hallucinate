@@ -85,7 +85,7 @@ matters.
 
 ## 6.4 What "reserved above 4 GiB" teaches about honesty
 
-One more decision from `docs/memory-map.md`: reserved E820 ranges above 4 GiB —
+One more decision from Appendix F: reserved E820 ranges above 4 GiB —
 for instance the 64-bit PCI MMIO hole — are *deliberately not mapped* by the
 kernel. The kernel maps all RAM plus the first 4 GiB (to reach legacy MMIO), and
 stops. Anything the hardware placed above 4 GiB that the kernel does not yet

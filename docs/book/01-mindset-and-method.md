@@ -79,7 +79,7 @@ pure function of its inputs and push the hardware to the edges.
 
 ## 1.3 Complete or absent
 
-This codebase has a rule, stated in `docs/architecture.md` as a design
+This codebase has a rule, stated in Appendix D as a design
 principle: *"Features are fully implemented within their documented scope or not
 merged. Unsupported operations fail explicitly."*
 
@@ -99,7 +99,7 @@ that is how you get corruption. The habit to build:
   in-bounds and overflow-free.
 
 The corollary is that *documented limits are a feature*, not an admission of
-failure. `docs/userspace.md` has a whole "Known limits of this slice" section:
+failure. Appendix H has a whole "Known limits of this slice" section:
 eager fork with no copy-on-write, no `WNOHANG`, no FPU save, static `ET_EXEC`
 only. Each is a deliberate, bounded scope with an explicit failure for anything
 outside it. That is what "professional" means in kernel work — not that
@@ -110,7 +110,7 @@ enforced by the code.
 
 Concurrency and hardware make kernel state fragile. The defense is to keep, for
 each subsystem, a short list of invariants so simple you can check them by
-inspection. The scheduler's list (`docs/scheduling.md`) is the model:
+inspection. The scheduler's list (Appendix G) is the model:
 
 1. `schedule()` is entered with interrupts disabled — always (and it asserts
    this).
@@ -150,7 +150,7 @@ nobody reads.
 ## 1.6 Make the machine prove it works, every time
 
 Nothing in this project is "tested by me running it once." Three levels of
-automated checking accumulate for the life of the codebase (Chapter 14 is the
+automated checking accumulate for the life of the codebase (Chapter 15 is the
 full treatment):
 
 - **Host unit tests** under ASan/UBSan for the pure cores.

@@ -33,7 +33,7 @@ metal:
 - **`--target=x86_64-elf`** — cross-compile for a bare x86_64 ELF target rather
   than macOS Mach-O. Clang is a cross-compiler out of the box; on Apple Silicon
   you are compiling for an architecture your build machine cannot even execute
-  natively, which is exactly why the host tests (Chapter 14) compile the *pure*
+  natively, which is exactly why the host tests (Chapter 15) compile the *pure*
   code a second time for the Mac.
 - **`-ffreestanding -fno-builtin`** — freestanding, and also stop the compiler
   from "helpfully" recognizing a loop as `memset` and calling a `memset` you
@@ -110,7 +110,7 @@ The compiler and linker give you two artifacts: flat binaries for the two
 bootloader stages (`nasm -f bin`) and an ELF for the kernel. The firmware,
 however, does not load ELFs or link scripts — it loads *sectors off a disk*. So
 `tools/mkimage.py` assembles a raw disk image with a specific on-disk layout
-(the full contract is `docs/boot-protocol.md`):
+(the full contract is Appendix E):
 
 | LBA | Contents |
 |-----|----------|
@@ -162,20 +162,28 @@ Putting it together, `make` walks this pipeline:
 
 ```
 boot/*.asm      --nasm -f bin-->   stage1.bin, stage2.bin
-user/*.c,*.asm  --clang/nasm/lld->  init.elf, hello.elf  (embedded into kernel .rodata)
 kernel/**.c,*.asm --clang/nasm-->  *.o  --ld.lld -T linker.ld-->  kernel.elf
                                     |
                      tools/mkimage.py assembles + patches
                                     v
-                              build/disk.img
+                              build/disk.img                (the boot disk)
+
+user/*.c,*.asm  --clang/nasm/lld-->  init.elf, hello.elf
+                                    |
+                     build/graphfs_mkfs installs at /bin (+ --dir /dev)
+                                    v
+                              build/fs.img                  (the filesystem disk)
 ```
 
-The userspace ELFs are currently *embedded into the kernel's `.rodata`*
-(`kernel/user_blob.asm` uses NASM's `incbin`) so that Phase 4 could run
-processes before a filesystem existed to load them from — a scaffold that Phase
-5c removes once the kernel can read `/bin/init` off graphfs. That is
-complete-or-absent in action: rather than a fake filesystem, an honest embedded
-blob with a clear expiry date.
+Two disks, two pipelines: the boot disk carries the bootloader and kernel; the
+filesystem disk is a graphfs image built by the project's own `graphfs_mkfs`
+tool, which installs the userspace ELFs at `/bin` — the kernel loads `/bin/init`
+from it at boot (Chapter 14). It was not always so: through Phase 4 the user
+ELFs were *embedded into the kernel's `.rodata`* (a `user_blob.asm` using NASM's
+`incbin`) so processes could run before any filesystem existed — an honest
+scaffold with a clear expiry date, torn down on schedule in Phase 5c. That is
+complete-or-absent in action: rather than a fake filesystem, an embedded blob
+that said plainly what it was, and then left.
 
 You now have a toolchain that produces a bootable image for a machine with no
 OS. In the next chapter the firmware loads sector 0 and runs it, and we begin

@@ -2,7 +2,7 @@
  * graphfs_core.c - the copy-on-write, self-checksumming graphfs core.
  *
  * Pure C over the struct gfs_ops block callbacks (see graphfs_core.h and
- * docs/graphfs.md for the model and on-disk format). The whole module is
+ * docs/book/appendix-k-graphfs.md for the model and on-disk format). The whole module is
  * host-testable under ASan/UBSan; the kernel driver, the mkfs tool, and
  * the fsck tool are thin wrappers over exactly this code.
  *

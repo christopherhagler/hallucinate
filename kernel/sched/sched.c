@@ -6,7 +6,7 @@
  * integration, and interrupt-off critical sections. Single CPU: all
  * scheduler state is protected by disabling interrupts.
  *
- * Invariants (see docs/scheduling.md):
+ * Invariants (see docs/book/appendix-g-scheduling.md):
  *   - schedule() is entered with interrupts disabled, always.
  *   - `current` is never on the ready queue or the sleep list.
  *   - The idle thread never blocks, sleeps, exits, or queues; it is

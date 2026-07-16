@@ -50,7 +50,7 @@ What each is for, mapped to what you have already read:
 - **clang** (Xcode CLT) — the C compiler. Clang is a cross-compiler natively;
   `--target=x86_64-elf` is all it takes to emit bare-metal x86-64 (Chapter 2).
   It also compiles the *pure cores* a second time, for your Mac, under sanitizers
-  (Chapter 14).
+  (Chapter 15).
 - **nasm** — assembles the bootloader (flat binary, `-f bin`) and the kernel/user
   assembly stubs (`-f elf64`).
 - **lld** (`ld.lld`) — the linker. Applies the higher-half linker script
@@ -171,7 +171,7 @@ make run        # boot it in QEMU with a window + serial on stdio
 make check      # the gate: host sanitizer tests + boot integration + fsck
 ```
 
-`make check` is the one you run constantly (Chapter 14). It is fast, and green-
+`make check` is the one you run constantly (Chapter 15). It is fast, and green-
 before-commit is the law. `make run` boots the real image interactively so you can
 watch the serial log and type at the keyboard echo loop. When you are working on a
 pure core, the tightest loop is even smaller — build and run just the host tests:
@@ -203,7 +203,7 @@ is *loud* (`panic` prints `PANIC: file:line: message`; the bootloader prints
 `ERR:`), and the panic path dumps registers. When the machine dies, read the panic
 line first — it usually names the file and the reason.
 
-Remember the diagnostic corollary from Chapter 14: because every fatal path is
+Remember the diagnostic corollary from Chapter 15: because every fatal path is
 loud, **a silent hang means something wedged before reaching a known failure
 point** — often an early spin loop, a fault before the IDT is installed, or a
 deadlock with interrupts off. Silence is itself a clue about *where* to look.
@@ -289,7 +289,7 @@ Put the instruments together into a way of working:
 1. **Read a chapter, then read its code** with the repo open, setting a gdb
    breakpoint in the function it describes and watching it run. Concept, then
    code, then *observed behavior* — all three, or it will not stick.
-2. **Reproduce a subsystem from its tests** (Chapter 16 §2): blank the body of
+2. **Reproduce a subsystem from its tests** (Chapter 17 §2): blank the body of
    `pmm_core.c` or `sched_core.c`, keep the header and host tests, and reimplement
    until `make check-host` is green. The tests are a specification; passing them
    from scratch is how you learn which invariants are load-bearing.

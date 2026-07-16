@@ -3,7 +3,7 @@
  *
  * Higher-half kernel: virtual addresses at KERNEL_VMA + 1 MiB, physical load
  * addresses (p_paddr, used by stage 2) at 1 MiB. Keep in sync with
- * docs/boot-protocol.md and kernel/include/memlayout.h.
+ * docs/book/appendix-e-boot-protocol.md and kernel/include/memlayout.h.
  */
 
 ENTRY(_start)

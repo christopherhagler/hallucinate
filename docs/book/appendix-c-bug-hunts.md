@@ -82,7 +82,7 @@ contract usually *is* the design the next feature needs.
 
 ### The proof
 
-Rule 2 of the testing policy (Chapter 14): a bug fix lands with a test that
+Rule 2 of the testing policy (Chapter 15): a bug fix lands with a test that
 failed before it. The test here is worth studying because getting it right
 is subtle — you are trying to catch the *compiler* being entitled to hurt
 you, using the compiler:
@@ -118,7 +118,7 @@ fails; with the fix, all fifteen markers pass.
   contract-vs-code read is a debugging instrument too — arguably the highest-
   yield one, and the only one that works on bugs that haven't fired yet.
 - **When you fix a contract bug, fix the written contract too.** The same
-  commit added a "preserved" row to `docs/userspace.md`'s ABI table. The next
+  commit added a "preserved" row to Appendix H's ABI table. The next
   reader of the stub now has the promise in front of them.
 
 ---
@@ -308,7 +308,7 @@ distinguishable at all. (Instruments: Chapter 0 §0.5.)
 
 Two rules complete the table. First, **silence is data**: in a codebase
 where every failure is loud, the absence of output localizes the failure to
-the regions that cannot yet speak (Chapter 14 §14.3). Second, **the last
+the regions that cannot yet speak (Chapter 15 §15.3). Second, **the last
 move of every hunt is a test** — the table gets you to a cause, but the hunt
 ends only when the cause cannot recur unannounced. That is the difference
 between "fixed it" and "finished it," and it is the through-line of all

@@ -1,8 +1,9 @@
 # Userspace and System Calls
 
-Phase 4 brings ring 3. This document covers user address spaces, the
-SYSCALL/SYSRET path, the ELF64 loader, and the process model: fork, execve,
-wait4, exit over a host-tested process table.
+Phase 4 brings ring 3; Phase 5 gives it files. This document covers user
+address spaces, the SYSCALL/SYSRET path, the ELF64 loader, the process model —
+fork, execve, wait4, exit over a host-tested process table — and the file
+descriptor layer over the VFS (Appendix J).
 
 ## System call ABI
 
@@ -24,12 +25,23 @@ Implemented today (numbers from the Linux x86_64 table):
 
 | # | syscall | scope |
 |---|---|---|
-| 1 | `write(fd, buf, count)` | fd 1/2 → kernel console; full validation, returns count |
+| 0 | `read(fd, buf, count)` | any open fd; console reads block until input, then short-read |
+| 1 | `write(fd, buf, count)` | any open fd; disk files are `-EBADF` until the 5d write path |
+| 2 | `open(path, flags)` | access mode + `O_DIRECTORY` only; disk opens for write are `-EROFS` |
+| 3 | `close(fd)` | drops the fd table's reference; last reference frees the description |
+| 5 | `fstat(fd, statbuf)` | the Linux x86_64 144-byte `struct stat` (`_Static_assert`ed) |
+| 8 | `lseek(fd, off, whence)` | SET/CUR/END on files and directories; `-ESPIPE` on the console |
 | 39 | `getpid()` | the calling process's pid |
 | 57 | `fork()` | full process clone (eager copy; COW later); child gets rax = 0 |
-| 59 | `execve(path, argv, envp)` | replace the image from the built-in program table; SysV argv/envp stack |
-| 60 | `exit(status)` | zombie in the table, parent woken |
+| 59 | `execve(path, argv, envp)` | replace the image with the ELF at `path` on the filesystem; SysV argv/envp stack; fds survive |
+| 60 | `exit(status)` | zombie in the table, parent woken, every fd closed |
 | 61 | `wait4(pid, wstatus, 0, NULL)` | blocking reap of one child (pid > 0 exact, -1 any); Linux `WIFEXITED` status encoding |
+| 217 | `getdents64(fd, buf, count)` | real `linux_dirent64` records; directories synthesize `.` and `..` |
+
+The fd-backed syscalls dispatch through the VFS `struct file_ops` vtable; a
+`NULL` slot maps to the conventional errno (`write` on a read-only file
+`-EBADF`, `lseek` on the console `-ESPIPE`, `getdents64` on a regular file
+`-ENOTDIR`). The full open-file semantics live in Appendix J.
 
 Every user pointer is validated before use: the range must lie below
 `USER_VA_LIMIT` (`0x0000800000000000`, the canonical lower half) and every
@@ -105,7 +117,8 @@ Loading is split the same way as every other core/kernel pair in the tree:
 `user/user.ld` links user programs at `0x400000` with three page-aligned
 `PT_LOAD` segments (text R+X, rodata R, data+bss RW) so the per-segment W^X
 policy is exercised by the very first binary. The ELF headers themselves are
-not mapped into user memory; the kernel reads them from the embedded image.
+not mapped into user memory; the kernel parses them from the kernel-side
+buffer `vfs_read_file()` filled from disk.
 
 ## The process model
 
@@ -115,6 +128,14 @@ host-tested): up to 64 processes, monotonically increasing pids starting at
 reparenting to init on parent exit. The kernel wraps it
 (`kernel/proc/process.c`) with what a pure table cannot hold: the address
 space, the hosting kernel thread, the blocked waiter, and the process name.
+
+Each process also owns a **file descriptor table** (`FD_MAX` = 16 slots of
+`struct file *`). An fd is an index into it; the object it names is a VFS open
+file description, refcounted so `fork` can duplicate the table by pointer —
+parent and child share each description, offset included, per POSIX. `execve`
+leaves the table untouched (no close-on-exec flags yet — documented), and exit
+closes everything. Init starts with fds 0/1/2 all referencing one open of
+`/dev/console`.
 
 Every process is **hosted by a kernel thread**. The thread builds nothing
 itself — it receives a completed image (address space + start frame),
@@ -136,8 +157,9 @@ The lifecycle syscalls:
   segments, stack, argv/envp — so any failure (`-ENOENT`, `-ENOMEM`,
   `-E2BIG`) returns with the caller unharmed. On success it swaps the
   address space, reloads CR3, destroys the old space, and rewrites the saved
-  syscall frame so `sysret` lands at the new entry point. Programs come from
-  a built-in table (`/bin/init`, `/bin/hello`) until the VFS exists.
+  syscall frame so `sysret` lands at the new entry point. The image comes off
+  the filesystem: `vfs_read_file()` reads the whole ELF into a kernel buffer,
+  the loader materializes it, the buffer is freed.
 - **`exit`** marks the process a zombie holding its status, reparents its
   children to init, wakes the parent if it is blocked in `wait4`, and ends
   the hosting thread.
@@ -178,37 +200,48 @@ Init is a freestanding C program: `user/crt0.asm` plus `user/init.c`, with
 syscall wrappers in `user/syscall.h` and a tiny `user/ulib.h`. User code is
 compiled without SSE and without the red zone — the kernel does not save
 FPU/SSE state across context switches, and interrupts run on the current
-stack. The linked ELFs (`init.elf`, `hello.elf`) are embedded in kernel
-`.rodata` (`kernel/user_blob.asm`); boot loads init and joins it:
+stack. The linked ELFs are installed at `/bin` on the graphfs image
+(`build/fs.img`, built by `tools/graphfs_mkfs.c`); boot reads `/bin/init`
+through the VFS and joins it:
 
 ```
-user: launching init (embedded ELF, 13344 bytes)
+user: launching init (/bin/init from disk, 13448 bytes)
 hello from ring 3
 hello from execve
+user: console open via /dev/console ok
 user: C init: .data .bss .rodata ok
 user: init exited (status 0)
 ```
 
-Init doubles as the acceptance test for the loader, the ABI, and the
-process model. Its exit status names the first failed check; 0 means all
-twenty passed: `write` returns the full length, `.bss` zero-filled, `.data`
-initialized and writable, `getpid`, `-ENOSYS`/`-EBADF`/`-EFAULT` error
-paths, all six argument registers surviving a syscall, the full process
-round trip — `fork` returns a fresh pid, the child `execve`s `/bin/hello`
-(which verifies its own argv arrived intact and exits 42), `wait4` returns
-that pid with status `42 << 8`, a second `wait4` returns `-ECHILD`,
-`execve` of an unknown path returns `-ENOENT` — and fault isolation: a
-forked child that writes to a kernel address is killed with `SIGSEGV`, one
-that executes an illegal instruction with `SIGILL`, both observed through
-`wait4` while everything else keeps running. After init is reaped, the
-kernel asserts the process table is empty and that the physical frame count
-matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
+Init doubles as the acceptance test for the loader, the ABI, the process
+model, and the whole VFS read side. Its exit status names the first failed
+check; 0 means all forty-seven passed: `write` returns the full length,
+`.bss` zero-filled, `.data` initialized and writable, `getpid`,
+`-ENOSYS`/`-EBADF`/`-EFAULT` error paths, all six argument registers
+surviving a syscall, the full process round trip — `fork` returns a fresh
+pid, the child `execve`s `/bin/hello` (which verifies its own argv arrived
+intact and exits 42), `wait4` returns that pid with status `42 << 8`, a
+second `wait4` returns `-ECHILD`, `execve` of an unknown path returns
+`-ENOENT` — fault isolation: a forked child that writes to a kernel address
+is killed with `SIGSEGV`, one that executes an illegal instruction with
+`SIGILL`, both observed through `wait4` while everything else keeps running —
+and the file surface: a known ELF opened and its magic read, `lseek` END/SET
+proven against `fstat`'s size, `/bin` walked with `getdents64` and required
+to hold exactly `.`, `..`, `init`, `hello`, `/dev/../bin/./hello` resolving
+through the normalizer, and every error contract probed (`-ENOENT`,
+`-ENOTDIR`, `-EISDIR`, `-EROFS`, `-EBADF` after close, `-ESPIPE` on the
+console). After init is reaped, the kernel asserts the process table is
+empty and that the physical frame count matches the pre-launch value: the
+whole fork/exec/wait cycle leaks nothing.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
 - Static `ET_EXEC` only; `ET_DYN`/interpreters are Phase 7 territory.
-- `execve` loads from a built-in program table; real paths arrive with the
-  VFS (Phase 5).
+- The root mount is read-only; `write` to disk files and the namespace
+  syscalls (`mkdir`, `unlink`, ...) arrive with slice 5d.
+- `FD_MAX` is 16, there is no `dup`/`dup2`, and no close-on-exec flags.
+- No `chdir`: every process's working directory is `/`, and relative paths
+  resolve from there (defined, not undefined).
 - `fork` copies eagerly; no copy-on-write yet.
 - `wait4` supports options 0 and a NULL rusage only; no `WNOHANG`, no
   process groups. No signal *delivery* exists yet — signal numbers appear

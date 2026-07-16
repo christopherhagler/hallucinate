@@ -5,7 +5,7 @@
 ; sectors immediately following the boot sector (LBA 1..N) to 0000:7E00 using
 ; INT 13h LBA extensions, verify its magic, and jump to it.
 ;
-; Build-time patching (see tools/mkimage.py and docs/boot-protocol.md):
+; Build-time patching (see tools/mkimage.py and docs/book/appendix-e-boot-protocol.md):
 ;   The "HB1" marker below is followed by the Disk Address Packet; mkimage
 ;   patches the DAP sector count with the true size of stage 2.
 ;

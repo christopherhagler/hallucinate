@@ -48,7 +48,7 @@ does. Understand this and the address-space design in Chapter 10 becomes obvious
 ## 7.2 The layout: higher-half kernel, direct map, and the null trap
 
 `vmm_init()` throws away the bootloader's temporary tables and builds the
-kernel's permanent address space (`docs/memory-map.md`):
+kernel's permanent address space (Appendix F):
 
 | Virtual range | Maps to | Attributes |
 |---------------|---------|------------|
@@ -112,7 +112,7 @@ And then — the professional capstone — a **boot self-test verifies the
 protections actually took**. It attempts a write to a read-only page and confirms
 it faults, checks that data pages are NX, and so on. A security property you
 merely *configured* is a hope; a security property you *tested at runtime* is a
-fact. `docs/memory-map.md`: protections are "verified by boot selftests." This is
+fact. Appendix F: protections are "verified by boot selftests." This is
 the recurring highest standard of the whole codebase — do not assert that
 something is safe, arrange for the machine to demonstrate it on every boot.
 

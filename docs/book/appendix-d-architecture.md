@@ -4,12 +4,14 @@ Hallucinate OS is a from-scratch monolithic kernel for x86_64, written in C11 an
 booted by its own two-stage BIOS bootloader. This document describes the system as it
 exists today and the structure the rest of the roadmap builds on. Companion documents:
 
-- [boot-protocol.md](boot-protocol.md) — bootloader ↔ kernel contract (versioned)
-- [memory-map.md](memory-map.md) — physical and virtual address space layout
-- [scheduling.md](scheduling.md) — threads, context switch, preemption
-- [userspace.md](userspace.md) — ring 3, syscall ABI, ELF loading, the process model
-- [storage.md](storage.md) — PCI, virtio-blk, the block layer
-- [testing.md](testing.md) — the three-level test strategy behind `make check`
+- [Appendix E](appendix-e-boot-protocol.md) — bootloader ↔ kernel contract (versioned)
+- [Appendix F](appendix-f-memory-map.md) — physical and virtual address space layout
+- [Appendix G](appendix-g-scheduling.md) — threads, context switch, preemption
+- [Appendix H](appendix-h-userspace.md) — ring 3, syscall ABI, ELF loading, the process model
+- [Appendix I](appendix-i-storage.md) — PCI, virtio-blk, the block layer
+- [Appendix J](appendix-j-vfs.md) — the VFS: mounts, open files, fd tables, devfs
+- [Appendix K](appendix-k-graphfs.md) — graphfs, the native filesystem's on-disk format
+- [Appendix L](appendix-l-testing.md) — the three-level test strategy behind `make check`
 
 ## Design principles
 
@@ -39,13 +41,18 @@ kernel/
                           split-ring bookkeeping, host-tested), virtio_blk.c
   block/                  block device layer: 4 KiB blocks, write-through
                           LRU cache over the registered driver
+  fs/                     graphfs_core.c (pure on-disk format engine,
+                          host-tested), vfs.c (mounts, open files, graphfs
+                          vnode ops), vfs_path.c (pure path normalization,
+                          host-tested), devfs.c (/dev/console)
   mm/                     pmm_core.c + pmm.c (frame allocator),
                           vmm.c (kernel address space), heap_core.c + kmalloc.c (slab)
   sched/                  sched_core.c (policy, host-tested) + sched.c
-                          (threads, sleep/wake, join, preemption)
+                          (threads, sleep/wake, join, preemption),
+                          mutex.c (sleeping FIFO mutex)
   proc/                   proc_core.c (process table, host-tested) +
-                          process.c (fork/execve/wait4/exit), elf_load.c
-                          (segment loader), syscall.c (dispatch),
+                          process.c (fork/execve/wait4/exit, fd tables),
+                          elf_load.c (segment loader), syscall.c (dispatch),
                           uaccess.c (user pointer validation and copies)
   lib/                    freestanding C library: string.c, fmt.c (vsnprintf),
                           elf64.c (pure ELF64 validator, host-tested)
@@ -56,12 +63,15 @@ kernel/
   selftest.c              boot-time assertion suite
   main.c                  kmain: bring-up sequence
   linker.ld               higher-half link script (W^X section symbols)
-user/                     userspace: init.c, crt0.asm, syscall.h wrappers,
-                          user.ld (static ELF64 at 0x400000, W^X segments)
-tools/mkimage.py          disk image assembler + boot-protocol validator
+user/                     userspace: init.c, hello.c, crt0.asm, syscall.h
+                          wrappers, user.ld (static ELF64 at 0x400000, W^X
+                          segments); installed on fs.img at /bin
+tools/mkimage.py          boot disk image assembler + boot-protocol validator
+tools/graphfs_mkfs.c      builds fs.img (graphfs) from host files
+tools/graphfs_fsck.c      offline graphfs invariant checker (make check gate)
 tests/host/               unit tests, compiled for macOS under ASan/UBSan
 tests/run_qemu.py         headless QEMU integration harness
-docs/                     this documentation
+docs/book/                this documentation (chapters + these appendices)
 ```
 
 ## Boot flow
@@ -82,28 +92,31 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
    dispatcher (unhandled traps dump all registers and panic), PICs remapped to vectors
    0x20–0x2F and masked.
 3. Validate the bootinfo block (magic, version, E820 sanity); panic on any mismatch.
-4. `pmm_init()` — bitmap frame allocator seeded from E820 (see docs/memory-map.md).
+4. `pmm_init()` — bitmap frame allocator seeded from E820 (see Appendix F).
 5. `vmm_init()` — kernel page tables: HHDM direct map, W^X kernel image, NX, no
    identity map; page-fault handler with error decoding.
 6. `kmalloc_init()` — slab heap over PMM frames.
 7. `sched_init()` — the boot context becomes thread 0, the idle thread is created,
-   and the scheduler hooks the timer tick (see docs/scheduling.md).
-8. `syscall_init()` — SYSCALL/SYSRET MSRs (see docs/userspace.md).
+   and the scheduler hooks the timer tick (see Appendix G).
+8. `syscall_init()` — SYSCALL/SYSRET MSRs (see Appendix H).
 9. `timer_init(100)` / `keyboard_init()`, then interrupts on; the boot proves the timer
    ticks by sleeping on it.
 10. `pci_init()` / `virtio_blk_init()` / `block_selftest()` — bus scan, virtio-blk
     bring-up per VIRTIO 1.2, and a write/readback/restore round trip through the real
-    device (see docs/storage.md).
-11. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
+    device (see Appendix I).
+11. `vfs_init()` — mount the graphfs root read-only from the block device, initialize
+    devfs at `/dev` (see Appendix J). Panics if there is no disk or no valid filesystem.
+12. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
     protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
-12. `process_run_init()` — the embedded init ELF is validated and loaded into a
-    fresh user address space and runs in ring 3 as pid 1. Init exercises the
-    whole process model — it forks, the child execve()s a second embedded
-    program, init reaps it with wait4, and two deliberately crashed children
-    prove that a ring 3 fault kills only the faulting process — then exits;
-    the kernel verifies the process table is empty and not one physical frame
-    leaked.
-13. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
+13. `process_run_init()` — `/bin/init` is read off the filesystem, validated, loaded
+    into a fresh user address space, and runs in ring 3 as pid 1 with fds 0/1/2 open
+    on `/dev/console`. Init exercises the whole process model and the VFS read side —
+    it forks, the child execve()s `/bin/hello` from disk, init reaps it with wait4,
+    two deliberately crashed children prove that a ring 3 fault kills only the
+    faulting process, and every file syscall is probed against known filesystem
+    contents — then exits; the kernel verifies the process table is empty and not
+    one physical frame leaked.
+14. `boot: complete`, then an interactive keyboard echo loop (the pre-shell placeholder).
 
 ## Key subsystems (current)
 
@@ -145,7 +158,7 @@ Development host is macOS on Apple Silicon; no cross-compiler build is required:
 
 The phase plan (see README) drives toward three pillars:
 
-1. **A real OS**: memory management, scheduling, userspace, VFS/ext2, GUI.
+1. **A real OS**: memory management, scheduling, userspace, VFS + graphfs, GUI.
 2. **Linux binary compatibility**: a Linux syscall ABI personality layer so unmodified
    static musl binaries (busybox first) run natively — the same approach FreeBSD and
    managarm use. Syscall coverage will be tracked in `docs/syscalls.md`.

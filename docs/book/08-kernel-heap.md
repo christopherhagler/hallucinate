@@ -96,7 +96,7 @@ recurring theme — it *proves* adherence rather than trusting it. The scheduler
 self-tests assert the heap returns to its **exact pre-test object count** after
 threads are created and joined; the process self-tests assert the physical frame
 count is identical before and after an entire fork/exec/wait cycle
-(`docs/userspace.md`: "the whole fork/exec/wait cycle leaks nothing"). A single
+(Appendix H: "the whole fork/exec/wait cycle leaks nothing"). A single
 leaked control block would fail the boot.
 
 This is a powerful pattern you should copy into any long-lived system you build:

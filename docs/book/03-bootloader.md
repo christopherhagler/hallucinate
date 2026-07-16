@@ -94,7 +94,7 @@ immediately instead of hanging. **Make your failures loud and machine-detectable
 
 Stage 2 (`boot/stage2.asm`, ~530 lines) has room to do real work. It executes a
 precise sequence, each step a prerequisite for the next. The full contract is
-`docs/boot-protocol.md`; here is what each move *is* and why it is hard.
+Appendix E; here is what each move *is* and why it is hard.
 
 **1. Enable the A20 line.** For backwards compatibility with the 1 MiB
 wraparound behavior of the original 8086, PCs boot with address line 20 forced
@@ -174,7 +174,7 @@ including how you scream when you fail.
 Notice what the last step actually is: stage 2 fills a `struct bootinfo` at a
 fixed physical address (`0x6000`) and passes its pointer to the kernel. That
 struct — magic `"HLCN"`, a version, the boot drive, and the E820 array — is a
-**versioned interface** (`docs/boot-protocol.md`, `BOOTINFO_VERSION`). The
+**versioned interface** (Appendix E, `BOOTINFO_VERSION`). The
 kernel validates all of it on entry (`bootinfo_get()` in `main.c`) and panics on
 any mismatch: bad magic, wrong version, zero or too-many E820 entries.
 

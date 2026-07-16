@@ -93,7 +93,7 @@ standard than the code you find them in: it has to work when the rest of the
 kernel is broken, and it must never make things worse. Every design choice
 below follows from that.
 
-As the commit ledger records (Chapter 15), `vsnprintf` was written and
+As the commit ledger records (Chapter 16), `vsnprintf` was written and
 host-tested *before the bootloader existed* — the first freestanding code in
 the project ran under AddressSanitizer on a Mac before any code ran on the
 metal. `kernel/lib/fmt.c` is a complete C99 formatter (flags, width,
@@ -157,7 +157,7 @@ print `system halted`, halt forever. File and line cost nothing and convert
 per Chapter 0, is the first thing you read in any hunt. The register dumps
 for hardware exceptions live one layer down, in the trap dispatcher (§4.5),
 where the trapframe actually is. Together they enforce the property the
-whole test architecture leans on (Chapter 14): every fatal path is loud,
+whole test architecture leans on (Chapter 15): every fatal path is loud,
 patterned, and machine-detectable — which is precisely what makes silence
 itself diagnostic.
 

@@ -91,10 +91,11 @@ Filesystems see an array of `BLOCK_SIZE` (4 KiB) blocks:
 - Driver buffers must be physically contiguous; the cache's frame-backed
   entries satisfy this, and callers above the cache may pass any kernel
   memory.
-- v1 concurrency contract: one caller at a time, asserted (`busy` guard).
-  I/O takes milliseconds, so callers must not hold interrupts off. A
-  sleeping lock replaces the contract when the VFS gives multiple
-  processes concurrent disk access (5c).
+- Concurrency contract: one caller at a time, asserted (`busy` guard).
+  I/O takes milliseconds, so callers must not hold interrupts off. The
+  contract is discharged by the VFS (Appendix J): every runtime disk path
+  goes through `vfs.c`, which serializes behind one sleeping mutex;
+  boot-time callers run before userspace exists.
 
 Boot runs a self-test that round-trips a pattern through the *raw driver
 ops* on the last block (a cached read-after-write would pass without

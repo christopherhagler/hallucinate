@@ -8,7 +8,7 @@
  * passed to thread_join() exactly once, which blocks until it exits
  * and then frees its stack and control block.
  *
- * Design and invariants: docs/scheduling.md.
+ * Design and invariants: docs/book/appendix-g-scheduling.md.
  */
 #pragma once
 

@@ -8,7 +8,7 @@ one. Designing a durable, corruption-resistant on-disk layout is one of the
 deepest skills in systems programming, because the format is a contract with your
 own future self across power failures and years of code changes — and unlike an
 API, you cannot refactor it without a migration. The authoritative format spec is
-`docs/graphfs.md`; this chapter is the reasoning behind it.
+Appendix K; this chapter is the reasoning behind it.
 
 ## 13.1 The design decision: a graph, not a tree
 
@@ -87,7 +87,7 @@ is stated, not blurred.
 
 ## 13.4 The layout, and what the constants encode
 
-The on-disk geometry (full table in `docs/graphfs.md`, offsets in
+The on-disk geometry (full table in Appendix K, offsets in
 `kernel/include/graphfs_core.h`) is: two superblock slots at LBA 0 and 1, then two
 allocation-bitmap copies, then a copy-on-write region that begins with a node-map
 block and the root directory's node-table block and grows on demand. 4 KiB blocks
