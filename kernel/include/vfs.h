@@ -13,9 +13,17 @@
  * Every process's working directory is "/" — relative paths resolve
  * from the root until chdir exists.
  *
- * Slice 5c scope: the read side. The graphfs root is mounted
- * read-only; open(O_WRONLY/O_RDWR) on it reports -EROFS. The write
- * path (write/mkdir/link/unlink/rename/fsync) is slice 5d.
+ * The graphfs root is mounted writable (slice 5d): open takes
+ * O_CREAT/O_EXCL/O_TRUNC/O_APPEND, and mkdir/rmdir/unlink/link/
+ * rename mutate the namespace. devfs stays structurally immutable
+ * (-EPERM), and mount points ("/", "/dev") refuse removal (-EBUSY).
+ *
+ * v1 unlink policy, pinned here on purpose: removing the *last* NAME
+ * edge of a file some description still has open is -EBUSY. POSIX
+ * instead keeps the unlinked file alive until the last close; that
+ * needs on-disk orphan tracking (or leaks nodes across a crash), so
+ * it is deferred to the Linux personality work (Phase 7). Hard links
+ * make the common temp-file shapes expressible meanwhile.
  *
  * Concurrency: one global sleeping lock inside vfs.c serializes all
  * graphfs and block-device access (the gfs handle's scratch buffers
@@ -36,12 +44,15 @@
 struct file;
 
 /*
- * Per-file operations. A NULL slot means the operation does not
- * apply; the syscall layer maps it to the conventional error:
- * read -EINVAL, write -EBADF, lseek -ESPIPE, getdents -ENOTDIR
- * (fstat is mandatory). read/write/getdents return bytes transferred
- * or -errno and advance the file offset themselves; buffers are
- * kernel-valid or caller-validated user ranges.
+ * Per-file operations. A NULL slot means the *object* does not
+ * support the operation; the syscall layer maps it to the
+ * conventional error: read -EINVAL, write -EBADF, lseek -ESPIPE,
+ * getdents -ENOTDIR, fsync -EINVAL (fstat is mandatory). Whether
+ * this *description* may read or write (the open's access mode) is
+ * enforced inside the ops with -EBADF. read/write/getdents return
+ * bytes transferred or -errno and advance the file offset
+ * themselves; buffers are kernel-valid or caller-validated user
+ * ranges.
  */
 struct file_ops {
     long (*read)(struct file *f, void *buf, size_t len);
@@ -49,6 +60,7 @@ struct file_ops {
     long (*lseek)(struct file *f, int64_t off, int whence);
     long (*fstat)(struct file *f, struct stat *st);
     long (*getdents)(struct file *f, void *buf, size_t len);
+    long (*fsync)(struct file *f);
 };
 
 /*
@@ -66,7 +78,7 @@ struct file {
 };
 
 /*
- * Mount the graphfs root (read-only) from the registered block
+ * Mount the graphfs root (writable) from the registered block
  * device and initialize devfs. Requires the block device, kmalloc,
  * and the scheduler. Panics if there is no disk or no valid
  * filesystem on it — nothing can run without one.
@@ -74,11 +86,30 @@ struct file {
 void vfs_init(void);
 
 /*
- * Resolve `path` and build an open file description. Flags beyond
- * the access mode and O_DIRECTORY are rejected (-EINVAL). Returns 0
- * with *out holding one reference, or -errno.
+ * Resolve `path` and build an open file description. Supported
+ * flags: the access mode, O_CREAT/O_EXCL (mode & 07777 for a new
+ * file; no umask exists), O_TRUNC, O_APPEND, O_DIRECTORY; other
+ * bits are rejected (-EINVAL). Returns 0 with *out holding one
+ * reference, or -errno.
  */
-long vfs_open(const char *path, int flags, struct file **out);
+long vfs_open(const char *path, int flags, unsigned mode, struct file **out);
+
+/*
+ * Namespace mutation (graphfs only; devfs is immutable, mount
+ * points are busy). All follow POSIX/Linux error conventions;
+ * see the unlink -EBUSY policy in the header comment. rename
+ * across the devfs boundary is -EXDEV; link targets must be
+ * regular files (-EPERM for directories, as Linux).
+ */
+long vfs_mkdir(const char *path, unsigned mode);
+long vfs_rmdir(const char *path);
+long vfs_unlink(const char *path);
+long vfs_link(const char *oldpath, const char *newpath);
+long vfs_rename(const char *oldpath, const char *newpath);
+
+/* Boot-time introspection for the in-kernel fs selftest: current
+ * generation and free-space counters of the root graphfs. */
+void vfs_stats(uint64_t *generation, uint64_t *free_blocks, uint64_t *free_nodes);
 
 /* Reference counting for fd tables: fork takes, close drops; the
  * last drop frees the description. */

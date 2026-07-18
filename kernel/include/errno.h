@@ -18,12 +18,18 @@
 #define EAGAIN       11 /* resource temporarily unavailable */
 #define ENOMEM       12 /* out of memory */
 #define EFAULT       14 /* bad address */
+#define EBUSY        16 /* resource busy (open file, mount point) */
+#define EEXIST       17 /* file exists */
+#define EXDEV        18 /* cross-filesystem link or rename */
 #define ENODEV       19 /* no such device */
 #define ENOTDIR      20 /* not a directory */
 #define EISDIR       21 /* is a directory */
 #define EINVAL       22 /* invalid argument */
 #define EMFILE       24 /* per-process fd table full */
+#define EFBIG        27 /* file too large */
+#define ENOSPC       28 /* no space left on device */
 #define ESPIPE       29 /* illegal seek (not a seekable file) */
 #define EROFS        30 /* read-only filesystem */
 #define ENAMETOOLONG 36 /* file name too long */
 #define ENOSYS       38 /* syscall not implemented */
+#define ENOTEMPTY    39 /* directory not empty */

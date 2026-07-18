@@ -13,12 +13,14 @@
  * execs /bin/hello and reaps it, proves fault isolation — children
  * that touch kernel memory or execute an illegal instruction die
  * with the right signal while everything else keeps running — and
- * exercises the whole VFS read side (open/read/close/fstat/lseek/
- * getdents64, devfs, path normalization) against the known contents
- * of the boot filesystem image. The exit status is the report: 0
- * means every check passed, any other value names the first failed
- * check. The kernel prints the status and the boot integration test
- * asserts on it.
+ * exercises the whole VFS surface: the read side (open/read/close/
+ * fstat/lseek/getdents64, devfs, path normalization) against the
+ * known contents of the boot filesystem image, and the write path
+ * (O_CREAT/O_EXCL/O_TRUNC/O_APPEND, write, mkdir/rmdir, link/unlink,
+ * rename, fsync) in a scratch tree it removes without a trace. The
+ * exit status is the report: 0 means every check passed, any other
+ * value names the first failed check. The kernel prints the status
+ * and the boot integration test asserts on it.
  */
 #include <stdint.h>
 
@@ -255,8 +257,8 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     if (sys_open("/bin/hello", O_RDONLY | O_DIRECTORY) != -ENOTDIR) {
         return 41;
     }
-    /* The mount is read-only until the 5d write path. */
-    if (sys_open("/bin/hello", O_WRONLY) != -EROFS) {
+    /* A directory never opens for writing. */
+    if (sys_open("/bin", O_WRONLY) != -EISDIR) {
         return 42;
     }
     /* "." and ".." normalize away (lexically, before resolution). */
@@ -280,6 +282,154 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     }
     if (sys_close((int)fd) != 0) {
         return 47;
+    }
+
+    /* --- the write path (slice 5d) --- */
+
+    /* mkdir, and EEXIST on repeat. */
+    if (sys_mkdir("/t", 0755) != 0) {
+        return 48;
+    }
+    if (sys_mkdir("/t", 0755) != -EEXIST) {
+        return 49;
+    }
+    /* O_CREAT makes a file; the fd gives back exactly what we wrote. */
+    static const char payload[] = "graphfs write path from ring 3";
+    fd = sys_open3("/t/f", O_CREAT | O_EXCL | O_RDWR, 0644);
+    if (fd < 0) {
+        return 50;
+    }
+    if (sys_write((int)fd, payload, sizeof(payload)) != (long)sizeof(payload)) {
+        return 51;
+    }
+    if (sys_lseek((int)fd, 0, SEEK_SET) != 0) {
+        return 52;
+    }
+    char rbuf[64];
+    if (sys_read((int)fd, rbuf, sizeof(rbuf)) != (long)sizeof(payload)) {
+        return 53;
+    }
+    for (unsigned i = 0; i < sizeof(payload); i++) {
+        if (rbuf[i] != payload[i]) {
+            return 54;
+        }
+    }
+    if (sys_fstat((int)fd, &st) != 0 || st.st_size != (long)sizeof(payload) || st.st_nlink != 1) {
+        return 55;
+    }
+    /* fsync succeeds on a file (every write is already durable). */
+    if (sys_fsync((int)fd) != 0) {
+        return 56;
+    }
+    /* O_EXCL refuses an existing path. */
+    if (sys_open3("/t/f", O_CREAT | O_EXCL | O_RDWR, 0644) != -EEXIST) {
+        return 57;
+    }
+    if (sys_close((int)fd) != 0) {
+        return 58;
+    }
+    /* O_APPEND lands writes at EOF. */
+    fd = sys_open("/t/f", O_WRONLY | O_APPEND);
+    if (fd < 0) {
+        return 59;
+    }
+    if (sys_write((int)fd, "!", 1) != 1) {
+        return 60;
+    }
+    if (sys_fstat((int)fd, &st) != 0 || st.st_size != (long)sizeof(payload) + 1) {
+        return 61;
+    }
+    /* A write-only description refuses read... */
+    if (sys_read((int)fd, rbuf, 1) != -EBADF) {
+        return 62;
+    }
+    if (sys_close((int)fd) != 0) {
+        return 63;
+    }
+    /* ...and a read-only one still refuses write (checked at 29). */
+
+    /* link: two names, one file — nlink says so, bytes agree. */
+    if (sys_link("/t/f", "/t/g") != 0) {
+        return 64;
+    }
+    fd = sys_open("/t/g", O_RDONLY);
+    if (fd < 0 || sys_fstat((int)fd, &st) != 0 || st.st_nlink != 2) {
+        return 65;
+    }
+    if (sys_read((int)fd, rbuf, 4) != 4 || rbuf[0] != payload[0]) {
+        return 66;
+    }
+    if (sys_close((int)fd) != 0) {
+        return 67;
+    }
+    /* Dropping one name keeps the file alive under the other. */
+    if (sys_unlink("/t/f") != 0 || sys_open("/t/f", O_RDONLY) != -ENOENT) {
+        return 68;
+    }
+    /* The last name of an *open* file cannot be removed (v1 policy):
+     * -EBUSY while open, gone after close. */
+    fd = sys_open("/t/g", O_RDONLY);
+    if (fd < 0) {
+        return 69;
+    }
+    if (sys_unlink("/t/g") != -EBUSY) {
+        return 70;
+    }
+    if (sys_close((int)fd) != 0 || sys_unlink("/t/g") != 0) {
+        return 71;
+    }
+    /* O_TRUNC empties an existing file. */
+    fd = sys_open3("/t/f2", O_CREAT | O_WRONLY, 0644);
+    if (fd < 0 || sys_write((int)fd, payload, sizeof(payload)) != (long)sizeof(payload) ||
+        sys_close((int)fd) != 0) {
+        return 72;
+    }
+    fd = sys_open("/t/f2", O_WRONLY | O_TRUNC);
+    if (fd < 0 || sys_fstat((int)fd, &st) != 0 || st.st_size != 0 || sys_close((int)fd) != 0) {
+        return 73;
+    }
+    /* rename moves the file; the old name is gone. */
+    if (sys_rename("/t/f2", "/t/f3") != 0 || sys_open("/t/f2", O_RDONLY) != -ENOENT) {
+        return 74;
+    }
+    /* A directory cannot move into its own subtree. */
+    if (sys_mkdir("/t/d", 0755) != 0) {
+        return 75;
+    }
+    if (sys_rename("/t", "/t/d/sub") != -EINVAL) {
+        return 76;
+    }
+    /* unlink on a directory / rmdir on a file: wrong tool, right errno. */
+    if (sys_unlink("/t/d") != -EISDIR) {
+        return 77;
+    }
+    if (sys_rmdir("/t/f3") != -ENOTDIR) {
+        return 78;
+    }
+    /* devfs and mount points refuse mutation. */
+    if (sys_mkdir("/dev/x", 0755) != -EPERM) {
+        return 79;
+    }
+    if (sys_rmdir("/dev") != -EBUSY) {
+        return 80;
+    }
+    if (sys_rename("/t/f3", "/dev/x") != -EXDEV) {
+        return 81;
+    }
+    /* fsync on the console: a special file with nothing to sync. */
+    if (sys_fsync(1) != -EINVAL) {
+        return 82;
+    }
+    /* rmdir refuses a non-empty directory, then the cleanup empties
+     * everything and the tree vanishes without a trace. */
+    if (sys_rmdir("/t") != -ENOTEMPTY) {
+        return 83;
+    }
+    if (sys_unlink("/t/f3") != 0 || sys_rmdir("/t/d") != 0 || sys_rmdir("/t") != 0) {
+        return 84;
+    }
+    if (sys_open("/t", O_RDONLY | O_DIRECTORY) != -ENOENT) {
+        return 85;
     }
 
     /* Patch the report in .data before printing it: proves the

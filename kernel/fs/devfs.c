@@ -194,7 +194,7 @@ long devfs_open(const char *rel, int flags, struct file **out) {
     const struct file_ops *ops;
     uint64_t node;
     if (rel[0] == '\0') {
-        if ((flags & O_ACCMODE) != O_RDONLY) {
+        if ((flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC)) != 0) {
             return -EISDIR;
         }
         ops = &DIR_OPS;
@@ -203,11 +203,27 @@ long devfs_open(const char *rel, int flags, struct file **out) {
         if ((flags & O_DIRECTORY) != 0) {
             return -ENOTDIR;
         }
+        if ((flags & O_CREAT) != 0 && (flags & O_EXCL) != 0) {
+            return -EEXIST;
+        }
+        /* O_TRUNC on a character device has no effect (as Linux). */
         ops = &CON_OPS;
         node = DEVFS_INO_CON;
-    } else {
+    } else if (strncmp(rel, "console/", 8) == 0) {
         /* A path *through* a known device is ENOTDIR, not ENOENT. */
-        return (strncmp(rel, "console/", 8) == 0) ? -ENOTDIR : -ENOENT;
+        return -ENOTDIR;
+    } else {
+        /* Missing name directly under /dev: creation is refused —
+         * devfs cannot grow nodes. A missing *intermediate* directory
+         * is plain ENOENT even with O_CREAT, as everywhere else. */
+        int nested = 0;
+        for (const char *p = rel; *p != '\0'; p++) {
+            if (*p == '/') {
+                nested = 1;
+                break;
+            }
+        }
+        return (!nested && (flags & O_CREAT) != 0) ? -EPERM : -ENOENT;
     }
     struct file *f = kzalloc(sizeof(*f));
     if (f == NULL) {

@@ -87,7 +87,8 @@ Filesystems see an array of `BLOCK_SIZE` (4 KiB) blocks:
 - `block_read`/`block_write` go through a 64-entry LRU cache
   (256 KiB of PMM frames). Writes are **write-through**: the cache never
   holds dirty data, so a crash can only lose what the filesystem had not
-  yet ordered. `fsync`-driven flushing arrives with the write path (5d).
+  yet ordered — and `fsync` has nothing to flush (it reports success on
+  already-durable data; see Appendix J).
 - Driver buffers must be physically contiguous; the cache's frame-backed
   entries satisfy this, and callers above the cache may pass any kernel
   memory.
@@ -115,6 +116,7 @@ features report the absence explicitly.
 
 - Single block device; no partitions (the fs disk is one filesystem).
 - Polled completion; no MSI-X, no async I/O, no request batching.
-- Write-through cache only; no dirty tracking until fsync lands (5d).
+- Write-through cache only; write-back with dirty tracking is a future
+  performance move that would make `fsync` meaningful.
 - The block layer is single-caller by contract until the VFS adds a
   sleeping lock (5c).

@@ -25,9 +25,9 @@ Implemented today (numbers from the Linux x86_64 table):
 
 | # | syscall | scope |
 |---|---|---|
-| 0 | `read(fd, buf, count)` | any open fd; console reads block until input, then short-read |
-| 1 | `write(fd, buf, count)` | any open fd; disk files are `-EBADF` until the 5d write path |
-| 2 | `open(path, flags)` | access mode + `O_DIRECTORY` only; disk opens for write are `-EROFS` |
+| 0 | `read(fd, buf, count)` | any readable fd; console reads block until input, then short-read |
+| 1 | `write(fd, buf, count)` | any writable fd; disk writes are durable before this returns |
+| 2 | `open(path, flags, mode)` | access mode + `O_CREAT`/`O_EXCL`/`O_TRUNC`/`O_APPEND`/`O_DIRECTORY`; other flags refused `-EINVAL` |
 | 3 | `close(fd)` | drops the fd table's reference; last reference frees the description |
 | 5 | `fstat(fd, statbuf)` | the Linux x86_64 144-byte `struct stat` (`_Static_assert`ed) |
 | 8 | `lseek(fd, off, whence)` | SET/CUR/END on files and directories; `-ESPIPE` on the console |
@@ -36,12 +36,20 @@ Implemented today (numbers from the Linux x86_64 table):
 | 59 | `execve(path, argv, envp)` | replace the image with the ELF at `path` on the filesystem; SysV argv/envp stack; fds survive |
 | 60 | `exit(status)` | zombie in the table, parent woken, every fd closed |
 | 61 | `wait4(pid, wstatus, 0, NULL)` | blocking reap of one child (pid > 0 exact, -1 any); Linux `WIFEXITED` status encoding |
+| 74 | `fsync(fd)` | 0 on graphfs objects (already durable); `-EINVAL` on the console |
+| 82 | `rename(old, new)` | atomic move/replace with POSIX semantics; `-EXDEV` across mounts |
+| 83 | `mkdir(path, mode)` | one atomic create+link transaction |
+| 84 | `rmdir(path)` | empty directories only; mount points are `-EBUSY` |
+| 86 | `link(old, new)` | hard links to regular files; directories are `-EPERM` |
+| 87 | `unlink(path)` | removes one name; last name of an *open* file is `-EBUSY` (v1 policy, Appendix J) |
 | 217 | `getdents64(fd, buf, count)` | real `linux_dirent64` records; directories synthesize `.` and `..` |
 
 The fd-backed syscalls dispatch through the VFS `struct file_ops` vtable; a
-`NULL` slot maps to the conventional errno (`write` on a read-only file
-`-EBADF`, `lseek` on the console `-ESPIPE`, `getdents64` on a regular file
-`-ENOTDIR`). The full open-file semantics live in Appendix J.
+`NULL` slot maps to the conventional errno (`write` on a directory `-EBADF`,
+`lseek` on the console `-ESPIPE`, `getdents64` on a regular file `-ENOTDIR`,
+`fsync` on the console `-EINVAL`), and the ops themselves enforce the
+description's access mode with `-EBADF`. The full open-file semantics live
+in Appendix J.
 
 Every user pointer is validated before use: the range must lie below
 `USER_VA_LIMIT` (`0x0000800000000000`, the canonical lower half) and every
@@ -205,7 +213,7 @@ stack. The linked ELFs are installed at `/bin` on the graphfs image
 through the VFS and joins it:
 
 ```
-user: launching init (/bin/init from disk, 13448 bytes)
+user: launching init (/bin/init from disk, 13488 bytes)
 hello from ring 3
 hello from execve
 user: console open via /dev/console ok
@@ -214,9 +222,9 @@ user: init exited (status 0)
 ```
 
 Init doubles as the acceptance test for the loader, the ABI, the process
-model, and the whole VFS read side. Its exit status names the first failed
-check; 0 means all forty-seven passed: `write` returns the full length,
-`.bss` zero-filled, `.data` initialized and writable, `getpid`,
+model, and the whole VFS. Its exit status names the first failed check; 0
+means all eighty-five passed: `write` returns the full length, `.bss`
+zero-filled, `.data` initialized and writable, `getpid`,
 `-ENOSYS`/`-EBADF`/`-EFAULT` error paths, all six argument registers
 surviving a syscall, the full process round trip — `fork` returns a fresh
 pid, the child `execve`s `/bin/hello` (which verifies its own argv arrived
@@ -225,20 +233,25 @@ second `wait4` returns `-ECHILD`, `execve` of an unknown path returns
 `-ENOENT` — fault isolation: a forked child that writes to a kernel address
 is killed with `SIGSEGV`, one that executes an illegal instruction with
 `SIGILL`, both observed through `wait4` while everything else keeps running —
-and the file surface: a known ELF opened and its magic read, `lseek` END/SET
+the read surface: a known ELF opened and its magic read, `lseek` END/SET
 proven against `fstat`'s size, `/bin` walked with `getdents64` and required
 to hold exactly `.`, `..`, `init`, `hello`, `/dev/../bin/./hello` resolving
 through the normalizer, and every error contract probed (`-ENOENT`,
-`-ENOTDIR`, `-EISDIR`, `-EROFS`, `-EBADF` after close, `-ESPIPE` on the
-console). After init is reaped, the kernel asserts the process table is
+`-ENOTDIR`, `-EISDIR`, `-EBADF` after close, `-ESPIPE` on the console) —
+and the write path, in a scratch tree init removes without a trace: a file
+created with `O_CREAT|O_EXCL`, written, reread byte-for-byte, `fstat`ed and
+`fsync`ed; `O_APPEND` landing at EOF; `O_TRUNC` emptying; a hard link
+sharing bytes and nlink; rename moving and the moved-into-own-subtree case
+refused `-EINVAL`; `mkdir`/`rmdir`/`unlink` with their whole errno
+vocabulary (`-EEXIST`, `-ENOTEMPTY`, `-EISDIR`, `-ENOTDIR`, the open-file
+`-EBUSY` policy, devfs `-EPERM`, mount-point `-EBUSY`, cross-mount
+`-EXDEV`). After init is reaped, the kernel asserts the process table is
 empty and that the physical frame count matches the pre-launch value: the
 whole fork/exec/wait cycle leaks nothing.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
 - Static `ET_EXEC` only; `ET_DYN`/interpreters are Phase 7 territory.
-- The root mount is read-only; `write` to disk files and the namespace
-  syscalls (`mkdir`, `unlink`, ...) arrive with slice 5d.
 - `FD_MAX` is 16, there is no `dup`/`dup2`, and no close-on-exec flags.
 - No `chdir`: every process's working directory is `/`, and relative paths
   resolve from there (defined, not undefined).

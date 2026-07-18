@@ -104,10 +104,12 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 10. `pci_init()` / `virtio_blk_init()` / `block_selftest()` — bus scan, virtio-blk
     bring-up per VIRTIO 1.2, and a write/readback/restore round trip through the real
     device (see Appendix I).
-11. `vfs_init()` — mount the graphfs root read-only from the block device, initialize
+11. `vfs_init()` — mount the graphfs root writable from the block device, initialize
     devfs at `/dev` (see Appendix J). Panics if there is no disk or no valid filesystem.
 12. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
-    protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
+    protections, heap, scheduler (thread interleaving, sleep, preemption, join), and
+    the filesystem write path (create/write/rename/unlink cycles onto the real disk,
+    free-space accounting asserted back to its starting counts).
 13. `process_run_init()` — `/bin/init` is read off the filesystem, validated, loaded
     into a fresh user address space, and runs in ring 3 as pid 1 with fds 0/1/2 open
     on `/dev/console`. Init exercises the whole process model and the VFS read side —

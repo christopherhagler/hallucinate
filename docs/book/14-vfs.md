@@ -20,7 +20,7 @@ The VFS (`kernel/fs/vfs.c`) is built from three small objects, each with one job
   tables, and everything above them dispatches through the pointer without a
   single `if (is_device)` anywhere in the syscall layer. A `NULL` slot means "this
   operation does not apply here," and the syscall layer maps it to the
-  conventional errno — `write` on a read-only file is `-EBADF`, `lseek` on the
+  conventional errno — `write` on a directory is `-EBADF`, `lseek` on the
   console is `-ESPIPE`, `getdents64` on a regular file is `-ENOTDIR`. The error
   vocabulary is part of the interface, decided once, at the boundary.
 - **`struct file`** — an *open file description*, the POSIX term worth being
@@ -152,18 +152,58 @@ read side — checks 21 through 47 open a known file and verify its ELF magic,
 prove `lseek END/SET` against `fstat`'s size, walk `/bin` with `getdents64` and
 require *exactly* `.`, `..`, `init`, `hello` and nothing else, then probe every
 error contract: `-ENOENT` for a missing name, `-ENOTDIR` for a path through a
-file, `-EISDIR` for reading a directory, `-EROFS` for opening anything on disk
-for write (the mount is read-only until 5d), `-EBADF` after close, `-ESPIPE`
+file, `-EISDIR` for reading a directory, `-EBADF` after close, `-ESPIPE`
 for seeking the console. A path like `/dev/../bin/./hello` must resolve — the
 normalizer's host tests re-proven end-to-end from ring 3. The exit status names
-the first failure; the boot test asserts 27 serial markers and `status 0`.
+the first failure; the boot test asserts the serial markers and `status 0`.
 
-The read side of a filesystem is the half you can prove without being able to
-mutate anything; the write path (`write`, `mkdir`, `link`, `unlink`, `rename`,
-`fsync`) is slice 5d, where the fsck-after-boot gate turns every future boot
-test into a crash-consistency test.
+## 14.7 The write path: teaching the namespace to change
 
-## 14.7 The transferable lessons
+The read side is the half you can prove without being able to mutate anything.
+Slice 5d mounts the root writable and adds the other half — `write`, `O_CREAT`
+and friends, `mkdir`/`rmdir`, `link`/`unlink`, `rename`, `fsync` — and three
+of its decisions are worth studying, because each one is a *policy* forced to
+the surface by an invariant.
+
+**Creation is atomic because fsck says so.** The graphfs core had
+`gfs_node_create` and `gfs_link` since slice 5b, and composing them would
+implement `mkdir` in two calls — with a crash window between them that leaves
+an allocated, unreferenced node. For a directory, that orphan is precisely
+what `gfs_fsck` flags as corruption ("namespace has 0 parents"). So the core
+grew `gfs_create_at`: create *and* link in one transaction, the node born
+with its name. The checker defined what the mutation path was allowed to look
+like — write your verifier first and it will design your API.
+
+**Unlinking an open file is `-EBUSY`, and the deviation is pinned.** POSIX
+keeps an unlinked-but-open file alive until its last close. Honoring that
+means on-disk orphan tracking (the node must survive a crash between unlink
+and close without leaking), which is real machinery for semantics nothing in
+this system needs yet. The alternatives were: implement it, leak nodes across
+crashes, or — worst — free the node while an fd still points at it and let
+the id be reused under a live file description. The kernel refuses exactly
+the dangerous case (`nlink == 1` and open descriptions exist), documents the
+deviation where the contract lives, and notes what will lift it (Phase 7).
+Hard links keep the common temp-file shapes expressible. A documented honest
+"no" beats a silent wrong "yes."
+
+**Rename's cycle check rides on the namespace invariant.** Moving `/a` into
+`/a/b/c` would detach a subtree into an unreachable cycle. Detecting that in
+a general graph means a reachability walk; in graphfs v1 it is a loop over
+single-parent fields from the destination up to the root — cheap because the
+5b policy decision ("namespaces have exactly one parent") already paid for
+it. Invariants compound: `..` as one field, no cycles possible, and now an
+O(depth) rename guard, all from the same choice.
+
+And the gate promised in 5c arrives: after every boot test, `run_qemu.py`
+runs `graphfs_fsck` over the image the guest actually wrote — the block
+selftest, the in-kernel stress cycles (create/write/rename/unlink with
+free-space accounting asserted back to the starting counts), and init's
+write-path checks (48 through 85, from `O_CREAT|O_EXCL` through the
+`-EBUSY`/`-EXDEV`/`-ENOTEMPTY` vocabulary, in a scratch tree init removes
+without a trace). Every `make check` is now a crash-consistency test of the
+write path, forever.
+
+## 14.8 The transferable lessons
 
 - **An ops vtable plus a refcounted description is the whole VFS trick.** Four
   ops tables, one dispatch site, POSIX offset-sharing from one refcount — no
@@ -182,8 +222,17 @@ test into a crash-consistency test.
   Collect patterns, not incidents.
 - **Let the acceptance suite grow with the surface.** Every new syscall landed
   with checks a boot cannot pass without executing them.
+- **Let the checker design the mutation.** `gfs_create_at` exists because
+  fsck's definition of a healthy image made two-call creation wrong; the
+  verifier was the design document.
+- **Deviate loudly or not at all.** The `-EBUSY` unlink policy is a
+  deliberate, written-down departure from POSIX with its lifting condition
+  named — the opposite of a quiet shortcut.
 
-The kernel now walks one namespace from `/` to devices and disk files, and
-nothing it runs is embedded in it. What remains of Phase 5 is teaching the
-namespace to change — the write path — with the crash-consistency gate that
-graphfs's copy-on-write design was built to pass.
+The kernel now walks one namespace from `/` to devices and disk files,
+nothing it runs is embedded in it, and the namespace changes under it —
+created, written, linked, renamed, unlinked — while every boot proves the
+disk image stayed perfectly consistent. Phase 5 is complete: the storage
+stack runs from PCI enumeration to POSIX semantics, and the crash-consistency
+gate graphfs's copy-on-write design was built to pass now runs on every
+`make check`.

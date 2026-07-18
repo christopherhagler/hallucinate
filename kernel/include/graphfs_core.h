@@ -237,6 +237,40 @@ int gfs_unlink(struct gfs *fs, uint64_t dir, const char *name);
  * written or error; never partial on GFS_ENOSPC. */
 long gfs_write(struct gfs *fs, uint64_t id, uint64_t off, const void *buf, size_t len);
 
+/*
+ * Create a node of `type` and link it as dir --name--> in ONE
+ * transaction. The two-call sequence (gfs_node_create + gfs_link) has
+ * a crash window that leaves an orphan — which for a NAMESPACE node
+ * fsck rightly reports as corruption — so namespace-visible creation
+ * (mkdir, O_CREAT) must come through here. Checks as gfs_link
+ * (GFS_ENOTDIR, GFS_EEXIST). On success *out is the new node's id.
+ */
+int gfs_create_at(struct gfs *fs, uint64_t dir, const char *name, uint32_t type, uint32_t mode,
+                  uint64_t *out);
+
+/*
+ * Atomically move olddir --oldname--> to newdir --newname--> (POSIX
+ * rename semantics). An existing newname is replaced: a DATA source
+ * replaces a DATA target (else GFS_EISDIR), a NAMESPACE source
+ * replaces an *empty* NAMESPACE target (else GFS_ENOTDIR /
+ * GFS_ENOTEMPTY); a replaced node whose nlink reaches 0 is freed with
+ * its blocks. If oldname and newname already refer to the same node
+ * (hard links), nothing happens and the call succeeds. Moving a
+ * namespace into itself or its own subtree is GFS_EINVAL.
+ */
+int gfs_rename(struct gfs *fs, uint64_t olddir, const char *oldname, uint64_t newdir,
+               const char *newname);
+
+/*
+ * Set a DATA node's size. Shrinking frees whole blocks past the new
+ * end and rewrites (CoW) the kept partial last block with its tail
+ * zeroed, so a later extension reads zeros — "bytes past EOF in the
+ * last block are zero" is a format invariant that fsck verifies.
+ * Growing only moves the size: the new range reads as a hole. The
+ * tail rewrite can split an extent, so GFS_EFRAG is possible.
+ */
+int gfs_truncate(struct gfs *fs, uint64_t id, uint64_t size);
+
 /* -------- checking -------- */
 
 /*

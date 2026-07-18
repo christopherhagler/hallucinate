@@ -252,5 +252,5 @@ One more thing the ledger shows: it took nineteen commits to get from an
 empty directory to a copy-on-write filesystem — not nineteen hundred. The
 sequencing discipline is not overhead on the real work; it is why the real
 work compounded instead of collapsing. Where the road goes from here — the
-VFS, the AI service layer, Linux compatibility, real hardware — is the
-final chapter's subject.
+AI service layer, Linux compatibility, real hardware — is the final
+chapter's subject.

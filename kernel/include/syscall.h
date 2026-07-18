@@ -27,6 +27,12 @@
 #define SYS_execve     59
 #define SYS_exit       60
 #define SYS_wait4      61
+#define SYS_fsync      74
+#define SYS_rename     82
+#define SYS_mkdir      83
+#define SYS_rmdir      84
+#define SYS_link       86
+#define SYS_unlink     87
 #define SYS_getdents64 217
 
 /*

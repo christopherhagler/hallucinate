@@ -162,11 +162,40 @@ buffer (`gfs_mount_work_size` = `2 * ceil(total_blocks/8)` bytes):
 Allocation draws only from blocks free in **both** bitmaps, so a block freed
 this transaction — still reachable through the one-generation fallback
 superblock — is never reused until the transaction commits. Each mutating
-call (`gfs_node_create`, `gfs_link`, `gfs_unlink`, `gfs_write`) is its own
-transaction: it CoWs the metadata it touches up to the node map, writes the
-inactive bitmap copy and inactive superblock slot at `generation + 1`, and
-returns only once that superblock write lands. There is no partial write on
-`GFS_ENOSPC`.
+call (`gfs_node_create`, `gfs_link`, `gfs_unlink`, `gfs_write`,
+`gfs_create_at`, `gfs_rename`, `gfs_truncate`) is its own transaction: it
+CoWs the metadata it touches up to the node map, writes the inactive bitmap
+copy and inactive superblock slot at `generation + 1`, and returns only once
+that superblock write lands. There is no partial write on `GFS_ENOSPC`.
+
+Three write calls arrived with slice 5d, shaped by the transaction model:
+
+- **`gfs_create_at(dir, name, type, mode)`** — create a node *and* link it
+  in one transaction. The two-call sequence (`gfs_node_create` +
+  `gfs_link`) has a crash window that leaves an orphan, and an orphaned
+  `NAMESPACE` node is exactly what fsck reports as corruption — so
+  namespace-visible creation (`mkdir`, `O_CREAT`) must be atomic. The node
+  is born with `nlink 1` and its parent set; no committed generation ever
+  holds an orphan.
+- **`gfs_rename(olddir, oldname, newdir, newname)`** — the POSIX move, one
+  transaction: source edge removed, existing destination replaced (a file
+  replaces a file, a directory replaces an *empty* directory; a replaced
+  node at `nlink 0` is freed with its blocks), new edge added, and a moved
+  directory's parent field rewritten. Moving a directory under its own
+  subtree is refused by walking the destination's single-parent chain to
+  the root — cheap precisely because namespaces are single-parent. Two
+  names for the same node rename to a no-op.
+- **`gfs_truncate(id, size)`** — shrink frees whole blocks past the new end
+  and CoW-rewrites the kept partial last block with its tail zeroed;
+  growth just moves the size (the new range reads as a hole).
+
+**Format invariant: bytes past EOF inside a file's last block are zero.**
+`gfs_write` establishes it (fresh partial blocks are zero-filled before the
+payload lands) and `gfs_truncate` maintains it (the shrink zeroes the kept
+tail), so extending a file — by write or by truncate — can never expose
+stale bytes from a previous life of the block. fsck verifies it for every
+file, along with its companion: no extent maps blocks at or past
+`ceil(size / 4096)`.
 
 ## Tools and testing
 
@@ -180,16 +209,22 @@ the kernel mounts — the format has a single implementation:
 - [`tools/graphfs_fsck.c`](../tools/graphfs_fsck.c) — `graphfs_fsck img`
   runs `gfs_fsck` over the image. Since a healthy CoW+checksummed image
   always passes, a failure means a core bug or media corruption. `make
-  check-fsck` gates the freshly built image; the 5d crash-consistency gate
-  will run the same check after boot.
+  check-fsck` gates the freshly built image, and `tests/run_qemu.py` runs
+  the same check on the image the guest *wrote to* after every boot test —
+  the write path is crash-consistency-verified on every `make check`.
 
 Three test levels cover the format:
 
 - **Host unit tests** — [`tests/host/test_graphfs.c`](../tests/host/test_graphfs.c),
-  built into `make check-host` under ASan/UBSan against an in-memory device.
-- **fsck gate** — `make check-fsck`, above.
-- **Boot integration** — the kernel mounts `build/fs.img` over virtio-blk
-  during `make check-boot` (read path in 5c).
+  built into `make check-host` under ASan/UBSan against an in-memory device:
+  format/mount/fallback properties, every write call's success and rejection
+  paths, rename's replace and cycle cases, truncate's zero-tail invariant,
+  and create/write/rename/unlink accounting round trips with fsck after
+  every mutation.
+- **fsck gates** — `make check-fsck` and the post-boot fsck, above.
+- **Boot integration** — the kernel mounts `build/fs.img` writable over
+  virtio-blk during `make check-boot`; the in-kernel selftest stress-cycles
+  the write path and init exercises it from ring 3.
 
 ## v1 limits (carried, by design)
 

@@ -5,6 +5,11 @@ Passes when every expected marker appears on the serial console in order.
 Fails immediately if a failure pattern ("PANIC", "ERR:") appears, or when the
 timeout expires; either way the full serial transcript is printed for
 diagnosis.
+
+With --fsck, the filesystem image the guest booted (and wrote to: the block
+selftest, the in-kernel fs stress test, init's write-path checks) is verified
+by graphfs_fsck after the run — every boot test doubles as an end-to-end
+crash-consistency test of the write path.
 """
 
 import argparse
@@ -29,9 +34,10 @@ PASS_MARKERS = [
     "pci: ",
     "virtio-blk: ",
     "block: selftest passed",
-    "vfs: graphfs root mounted ro",
+    "vfs: graphfs root mounted rw",
     "vfs: devfs at /dev",
     "selftest: sched interleave",
+    "selftest: fs write path ok",
     "selftest: passed",
     "user: launching init (/bin/init from disk",
     "hello from ring 3",
@@ -56,6 +62,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--image", required=True)
     ap.add_argument("--fsimg", help="filesystem image, attached as virtio-blk")
+    ap.add_argument("--fsck", help="graphfs_fsck binary: verify the written fs image post-boot")
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--qemu", default="qemu-system-x86_64")
     args = ap.parse_args()
@@ -134,6 +141,20 @@ def main() -> int:
     proc.kill()
     proc.wait()
     t.join(timeout=2)
+
+    # The guest wrote to its disk all boot long; the image it leaves
+    # behind must still be a perfectly consistent filesystem.
+    if result == "pass" and args.fsck and fs_copy is not None:
+        fsck = subprocess.run(
+            [args.fsck, fs_copy.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if fsck.returncode != 0:
+            result = "post-boot fsck failed:\n" + fsck.stdout
+        else:
+            print("post-boot fsck: clean")
 
     if fs_copy is not None:
         os.unlink(fs_copy.name)

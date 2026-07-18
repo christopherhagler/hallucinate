@@ -31,9 +31,13 @@ allocator, a path resolver, an ELF parser) must arrive with host unit tests.
 `kernel/selftest.c` runs a boot-time assertion suite over the freestanding library as
 compiled by the *real* kernel toolchain (`--target=x86_64-elf`, `-mcmodel=kernel`,
 no SSE). This catches codegen- and environment-specific breakage the host build cannot.
-On success it prints:
+It also stress-tests the filesystem write path against the real disk: repeated
+create/write/read/rename/unlink cycles through the VFS, asserting after each cycle
+that free blocks and nodes return exactly to their starting counts (the same leak
+discipline the PMM and heap tests use). On success it prints:
 
 ```
+selftest: fs write path ok (create/write/rename/unlink cycles)
 selftest: passed (N assertions)
 ```
 
@@ -60,6 +64,12 @@ and fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on 
 timeout. On failure the full serial transcript is printed. The bootloader and kernel are
 written so that every fatal path emits one of the failure patterns — a hang without
 output is the only failure mode the harness can attribute solely to a timeout.
+
+The guest boots a throwaway *copy* of `fs.img` and writes to it all boot long — the
+block selftest, the in-kernel fs stress cycles, init's write-path checks. After the
+markers pass, the harness runs `graphfs_fsck` over that written image and fails the
+test unless it is perfectly consistent: **every boot test is also an end-to-end
+crash-consistency test of the write path** (`--fsck`, wired in by `make check-boot`).
 
 As the OS grows, new integration scenarios add markers (and eventually scripted input via
 the QEMU monitor); existing markers are never removed, only extended.

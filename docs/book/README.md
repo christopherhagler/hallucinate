@@ -73,7 +73,7 @@ Two structural decisions shape almost every chapter, so learn them now:
 | 11 | [ELF Loading and Processes](11-processes.md) | fork, execve, wait4, exit, and killing a process without killing the kernel |
 | 12 | [Storage: PCI, virtio, and the Block Layer](12-storage.md) | Enumerating a bus, driving a paravirtual device, caching blocks |
 | 13 | [graphfs: A Filesystem From First Principles](13-graphfs.md) | Copy-on-write, self-checksumming, and designing an on-disk format |
-| 14 | [The VFS: One Namespace Over Many Filesystems](14-vfs.md) | Open files, fd tables, devfs, the kernel's first sleeping lock, and exec from disk |
+| 14 | [The VFS: One Namespace Over Many Filesystems](14-vfs.md) | Open files, fd tables, devfs, the first sleeping lock, exec from disk, and the write path |
 | 15 | [Testing and Professional Discipline](15-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
 | 16 | [How an OS Actually Gets Built](16-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
 | 17 | [Where to Go Next](17-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |

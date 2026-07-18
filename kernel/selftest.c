@@ -22,9 +22,11 @@
 #include <sched.h>
 #include <string.h>
 #include <timer.h>
+#include <vfs.h>
 #include <vmm.h>
 
 #include <arch/x86_64/paging.h>
+#include <errno.h>
 
 static int assertions;
 
@@ -296,6 +298,96 @@ static void test_sched(void) {
     CHECK(kmalloc_live_objects() == objects_before);
 }
 
+/* --- the filesystem write path --- */
+
+/*
+ * The boot-time stress for slice 5d: create/write/read/rename/unlink
+ * cycles through the real VFS onto the real disk, with the same
+ * leak discipline as the pmm/heap tests — after each cycle the
+ * filesystem must hold exactly as many free blocks and nodes as
+ * before it, and fsck verifies the resulting image after every boot
+ * test (tests/run_qemu.py). Runs before userspace exists, in thread
+ * context (vfs takes sleeping locks).
+ */
+static void test_fs(void) {
+    uint64_t gen0;
+    uint64_t blocks0;
+    uint64_t nodes0;
+    vfs_stats(&gen0, &blocks0, &nodes0);
+
+    for (int round = 0; round < 2; round++) {
+        CHECK(vfs_mkdir("/selftest", 0755) == 0);
+        CHECK(vfs_mkdir("/selftest", 0755) == -EEXIST);
+
+        /* Files at awkward sizes around the block boundary, written
+         * and read back through open file descriptions. */
+        static const size_t sizes[] = {1, 4095, 4096, 4097, 100000};
+        for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
+            char path[32];
+            snprintf(path, sizeof(path), "/selftest/f%u", i);
+            struct file *f = NULL;
+            CHECK(vfs_open(path, O_CREAT | O_EXCL | O_RDWR, 0644, &f) == 0);
+            uint8_t *buf = kmalloc(sizes[i]);
+            uint8_t *got = kzalloc(sizes[i]);
+            CHECK(buf != NULL && got != NULL);
+            for (size_t j = 0; j < sizes[i]; j++) {
+                buf[j] = (uint8_t)((j * 13) + i + 1);
+            }
+            CHECK(f->ops->write(f, buf, sizes[i]) == (long)sizes[i]);
+            CHECK(f->ops->lseek(f, 0, SEEK_SET) == 0);
+            CHECK(f->ops->read(f, got, sizes[i]) == (long)sizes[i]);
+            CHECK(memcmp(buf, got, sizes[i]) == 0);
+            struct stat st;
+            CHECK(f->ops->fstat(f, &st) == 0);
+            CHECK(st.st_size == (int64_t)sizes[i]);
+            CHECK(f->ops->fsync(f) == 0);
+            kfree(buf);
+            kfree(got);
+            vfs_file_put(f);
+        }
+
+        /* A read-only description refuses to write. */
+        struct file *ro = NULL;
+        CHECK(vfs_open("/selftest/f3", O_RDONLY, 0, &ro) == 0);
+        CHECK(ro->ops->write(ro, "x", 1) == -EBADF);
+        vfs_file_put(ro);
+
+        /* Mutation respects the mount table. */
+        CHECK(vfs_rmdir("/dev") == -EBUSY);
+        CHECK(vfs_mkdir("/dev/x", 0755) == -EPERM);
+        CHECK(vfs_rename("/selftest/f3", "/dev/f3") == -EXDEV);
+
+        /* Rename (plain and replacing), then tear everything down. */
+        CHECK(vfs_rmdir("/selftest") == -ENOTEMPTY);
+        CHECK(vfs_rename("/selftest/f0", "/selftest/renamed") == 0);
+        CHECK(vfs_unlink("/selftest/f0") == -ENOENT);
+        CHECK(vfs_rename("/selftest/f1", "/selftest/f2") == 0); /* replaces f2 */
+        CHECK(vfs_unlink("/selftest/renamed") == 0);
+        CHECK(vfs_unlink("/selftest/f2") == 0);
+        CHECK(vfs_unlink("/selftest/f3") == 0);
+        CHECK(vfs_unlink("/selftest/f4") == 0);
+
+        /* An open file's last name cannot be removed (the v1 -EBUSY
+         * policy); after the close it can. */
+        struct file *busy = NULL;
+        CHECK(vfs_open("/selftest/busy", O_CREAT | O_WRONLY, 0600, &busy) == 0);
+        CHECK(vfs_unlink("/selftest/busy") == -EBUSY);
+        vfs_file_put(busy);
+        CHECK(vfs_unlink("/selftest/busy") == 0);
+        CHECK(vfs_rmdir("/selftest") == 0);
+
+        /* Every block and node came back; the generation advanced. */
+        uint64_t gen1;
+        uint64_t blocks1;
+        uint64_t nodes1;
+        vfs_stats(&gen1, &blocks1, &nodes1);
+        CHECK(blocks1 == blocks0);
+        CHECK(nodes1 == nodes0);
+        CHECK(gen1 > gen0);
+    }
+    kprintf("selftest: fs write path ok (create/write/rename/unlink cycles)\n");
+}
+
 void selftest_run(void) {
     assertions = 0;
     test_string();
@@ -305,5 +397,6 @@ void selftest_run(void) {
     test_vmm();
     test_heap();
     test_sched();
+    test_fs();
     kprintf("selftest: passed (%d assertions)\n", assertions);
 }

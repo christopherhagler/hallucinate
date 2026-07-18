@@ -21,24 +21,39 @@
 #define SYS_execve     59
 #define SYS_exit       60
 #define SYS_wait4      61
+#define SYS_fsync      74
+#define SYS_rename     82
+#define SYS_mkdir      83
+#define SYS_rmdir      84
+#define SYS_link       86
+#define SYS_unlink     87
 #define SYS_getdents64 217
 
 /* Error numbers (Linux x86_64 values, negated in return values). */
-#define ENOENT  2
-#define EBADF   9
-#define ECHILD  10
-#define EFAULT  14
-#define ENOTDIR 20
-#define EISDIR  21
-#define EINVAL  22
-#define ESPIPE  29
-#define EROFS   30
-#define ENOSYS  38
+#define EPERM     1
+#define ENOENT    2
+#define EBADF     9
+#define ECHILD    10
+#define EFAULT    14
+#define EBUSY     16
+#define EEXIST    17
+#define EXDEV     18
+#define ENOTDIR   20
+#define EISDIR    21
+#define EINVAL    22
+#define ESPIPE    29
+#define EROFS     30
+#define ENOSYS    38
+#define ENOTEMPTY 39
 
 /* open(2) flags (Linux x86_64 values). */
 #define O_RDONLY    0
 #define O_WRONLY    1
 #define O_RDWR      2
+#define O_CREAT     0100
+#define O_EXCL      0200
+#define O_TRUNC     01000
+#define O_APPEND    02000
 #define O_DIRECTORY 0200000
 
 /* lseek(2) whence. */
@@ -126,6 +141,34 @@ static inline long sys_write(int fd, const void *buf, unsigned long count) {
 
 static inline long sys_open(const char *path, long flags) {
     return syscall3(SYS_open, (long)(uintptr_t)path, flags, 0);
+}
+
+static inline long sys_open3(const char *path, long flags, long mode) {
+    return syscall3(SYS_open, (long)(uintptr_t)path, flags, mode);
+}
+
+static inline long sys_fsync(int fd) {
+    return syscall1(SYS_fsync, fd);
+}
+
+static inline long sys_mkdir(const char *path, long mode) {
+    return syscall3(SYS_mkdir, (long)(uintptr_t)path, mode, 0);
+}
+
+static inline long sys_rmdir(const char *path) {
+    return syscall1(SYS_rmdir, (long)(uintptr_t)path);
+}
+
+static inline long sys_unlink(const char *path) {
+    return syscall1(SYS_unlink, (long)(uintptr_t)path);
+}
+
+static inline long sys_link(const char *oldpath, const char *newpath) {
+    return syscall3(SYS_link, (long)(uintptr_t)oldpath, (long)(uintptr_t)newpath, 0);
+}
+
+static inline long sys_rename(const char *oldpath, const char *newpath) {
+    return syscall3(SYS_rename, (long)(uintptr_t)oldpath, (long)(uintptr_t)newpath, 0);
 }
 
 static inline long sys_close(int fd) {

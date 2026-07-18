@@ -63,13 +63,9 @@ static uint64_t ensure_dir(struct gfs *fs, uint64_t dir, const char *name) {
     if (rc != GFS_ENOENT) {
         die("lookup", rc);
     }
-    rc = gfs_node_create(fs, GFS_NODE_NAMESPACE, 0755, &id);
+    rc = gfs_create_at(fs, dir, name, GFS_NODE_NAMESPACE, 0755, &id);
     if (rc != GFS_OK) {
-        die("mkdir create", rc);
-    }
-    rc = gfs_link(fs, dir, name, id, GFS_EDGE_NAME);
-    if (rc != GFS_OK) {
-        die("mkdir link", rc);
+        die("mkdir", rc);
     }
     return id;
 }
@@ -139,7 +135,7 @@ static void install(struct gfs *fs, const char *dest, const char *src) {
         }
         if (last) {
             uint64_t file;
-            int rc = gfs_node_create(fs, GFS_NODE_DATA, 0755, &file);
+            int rc = gfs_create_at(fs, dir, comp, GFS_NODE_DATA, 0755, &file);
             if (rc != GFS_OK) {
                 die("create file", rc);
             }
@@ -148,10 +144,6 @@ static void install(struct gfs *fs, const char *dest, const char *src) {
                 if (w != sz) {
                     die("write file", (int)w);
                 }
-            }
-            rc = gfs_link(fs, dir, comp, file, GFS_EDGE_NAME);
-            if (rc != GFS_OK) {
-                die("link file", rc);
             }
             printf("  %s <- %s (%ld bytes)\n", dest, src, sz);
         } else {

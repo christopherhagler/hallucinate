@@ -13,9 +13,11 @@
  * "one caller at a time" rule for all disk paths. It is taken for
  * the duration of one operation, never across a return to userspace.
  *
- * The mount is read-only in slice 5c: gfs write ops are never
- * reached (open refuses O_WRONLY/O_RDWR with -EROFS). Slice 5d
- * remounts writable and adds the write-side syscalls.
+ * The root is mounted writable (slice 5d). `node_opens[]` counts the
+ * open descriptions per graphfs node, maintained under fs_lock from
+ * open to last close, so removal of an open object can answer -EBUSY
+ * (the pinned v1 policy — see vfs.h) instead of freeing a node an fd
+ * still points at.
  */
 #include <vfs.h>
 
@@ -41,6 +43,10 @@ _Static_assert(sizeof(struct stat) == 144, "Linux x86_64 struct stat is 144 byte
 
 static struct gfs *root_fs;
 static struct mutex fs_lock = MUTEX_INITIALIZER("vfs");
+
+/* Open-description count per graphfs node id (fs_lock-guarded).
+ * Sized node_count entries at mount. */
+static uint32_t *node_opens;
 
 /* ---- block-device callbacks for the graphfs core ---- */
 
@@ -71,6 +77,21 @@ static long gfs_errno(int rc) {
         return -EROFS;
     case GFS_EINVAL:
         return -EINVAL;
+    case GFS_EEXIST:
+        return -EEXIST;
+    case GFS_ENOTEMPTY:
+        return -ENOTEMPTY;
+    case GFS_ENOSPC:
+    case GFS_EFRAG:
+        /* Out of blocks, node slots, or inline extents: however the
+         * space ran out, the write does not fit. */
+        return -ENOSPC;
+    case GFS_EFBIG:
+        return -EFBIG;
+    case GFS_EMANYPARENTS:
+        /* A second NAME edge onto a directory — Linux's answer to
+         * link(2) on a directory. */
+        return -EPERM;
     default:
         /* EIO covers device failure and detected corruption
          * (GFS_EBADCRC/GFS_ECORRUPT): the data cannot be served. */
@@ -99,12 +120,22 @@ void vfs_file_ref(struct file *f) {
     cpu_irq_restore(flags);
 }
 
+static int file_is_gfs(const struct file *f);
+
 void vfs_file_put(struct file *f) {
     uint64_t flags = cpu_irq_save();
     KASSERT(f->refs > 0);
     int gone = (--f->refs == 0);
     cpu_irq_restore(flags);
     if (gone) {
+        if (file_is_gfs(f)) {
+            /* The last reference is gone: the node is no longer held
+             * open, so unlink may free it again. */
+            mutex_lock(&fs_lock);
+            KASSERT(node_opens[f->node] > 0);
+            node_opens[f->node]--;
+            mutex_unlock(&fs_lock);
+        }
         kfree(f);
     }
 }
@@ -112,6 +143,9 @@ void vfs_file_put(struct file *f) {
 /* ---- graphfs-backed files ---- */
 
 static long gfsf_read(struct file *f, void *buf, size_t len) {
+    if ((f->flags & O_ACCMODE) == O_WRONLY) {
+        return -EBADF; /* this description was not opened for reading */
+    }
     mutex_lock(&fs_lock);
     long n = gfs_read(root_fs, f->node, f->off, buf, len);
     if (n < 0) {
@@ -121,6 +155,41 @@ static long gfsf_read(struct file *f, void *buf, size_t len) {
     f->off += (uint64_t)n;
     mutex_unlock(&fs_lock);
     return n;
+}
+
+static long gfsf_write(struct file *f, const void *buf, size_t len) {
+    if ((f->flags & O_ACCMODE) == O_RDONLY) {
+        return -EBADF; /* this description was not opened for writing */
+    }
+    mutex_lock(&fs_lock);
+    uint64_t off = f->off;
+    if ((f->flags & O_APPEND) != 0) {
+        /* Every append lands at the current EOF; atomic because the
+         * size read and the write share one fs_lock hold. */
+        struct gfs_node node;
+        int rc = gfs_node_get(root_fs, f->node, &node);
+        if (rc != GFS_OK) {
+            mutex_unlock(&fs_lock);
+            return gfs_errno(rc);
+        }
+        off = node.size;
+    }
+    long n = gfs_write(root_fs, f->node, off, buf, len);
+    if (n < 0) {
+        mutex_unlock(&fs_lock);
+        return gfs_errno((int)n);
+    }
+    f->off = off + (uint64_t)n;
+    mutex_unlock(&fs_lock);
+    return n;
+}
+
+/* Every mutating graphfs call commits before it returns (CoW publish
+ * through the write-through block cache), so an fsync has nothing
+ * left to flush; it exists so callers can *ask* for durability. */
+static long gfsf_fsync(struct file *f) {
+    (void)f;
+    return 0;
 }
 
 static long gfsf_lseek(struct file *f, int64_t off, int whence) {
@@ -268,53 +337,111 @@ static long gfsf_getdents(struct file *f, void *buf, size_t len) {
 
 static const struct file_ops GFS_FILE_OPS = {
     .read = gfsf_read,
-    .write = NULL, /* -EBADF: 5c opens are read-only */
+    .write = gfsf_write, /* refuses O_RDONLY descriptions itself */
     .lseek = gfsf_lseek,
     .fstat = gfsf_fstat,
     .getdents = NULL, /* -ENOTDIR */
+    .fsync = gfsf_fsync,
 };
 
 static const struct file_ops GFS_DIR_OPS = {
     .read = gfsf_dir_read,
-    .write = NULL,
+    .write = NULL, /* -EBADF: directories never open for writing */
     .lseek = gfsf_lseek,
     .fstat = gfsf_fstat,
     .getdents = gfsf_getdents,
+    .fsync = gfsf_fsync, /* fsync on a directory fd is valid POSIX */
 };
+
+static int file_is_gfs(const struct file *f) {
+    return f->ops == &GFS_FILE_OPS || f->ops == &GFS_DIR_OPS;
+}
 
 /* ---- resolution and open ---- */
 
-static long gfs_open(const char *canon, int flags, struct file **out) {
+/*
+ * Split a canonical path (not "/") into its parent directory path and
+ * final component. `parent` must hold VFS_PATH_MAX bytes; `*name`
+ * points into `canon`.
+ */
+static void path_split(const char *canon, char *parent, const char **name) {
+    size_t last = 0;
+    for (size_t i = 0; canon[i] != '\0'; i++) {
+        if (canon[i] == '/') {
+            last = i;
+        }
+    }
+    if (last == 0) {
+        parent[0] = '/';
+        parent[1] = '\0';
+    } else {
+        memcpy(parent, canon, last);
+        parent[last] = '\0';
+    }
+    *name = canon + last + 1;
+}
+
+static long gfs_open(const char *canon, int flags, unsigned mode, struct file **out) {
+    int accmode = flags & O_ACCMODE;
     mutex_lock(&fs_lock);
     uint64_t id = 0;
-    int rc = gfs_resolve(root_fs, canon, &id);
     struct gfs_node node;
+    int rc = gfs_resolve(root_fs, canon, &id);
     if (rc == GFS_OK) {
+        if ((flags & O_CREAT) != 0 && (flags & O_EXCL) != 0) {
+            mutex_unlock(&fs_lock);
+            return -EEXIST;
+        }
         rc = gfs_node_get(root_fs, id, &node);
+    } else if (rc == GFS_ENOENT && (flags & O_CREAT) != 0 && strcmp(canon, "/") != 0) {
+        /* Create the missing final component in its parent — under the
+         * same lock hold as the failed resolve, so no one races us. */
+        char parent[VFS_PATH_MAX];
+        const char *name = NULL;
+        path_split(canon, parent, &name);
+        uint64_t dir = 0;
+        rc = gfs_resolve(root_fs, parent, &dir);
+        if (rc == GFS_OK) {
+            rc = gfs_create_at(root_fs, dir, name, GFS_NODE_DATA, mode & 07777u, &id);
+        }
+        if (rc == GFS_OK) {
+            rc = gfs_node_get(root_fs, id, &node);
+        }
     }
-    mutex_unlock(&fs_lock);
     if (rc != GFS_OK) {
+        mutex_unlock(&fs_lock);
         return gfs_errno(rc);
     }
 
-    int accmode = flags & O_ACCMODE;
     if (node.type == GFS_NODE_NAMESPACE) {
-        if (accmode != O_RDONLY) {
+        /* Directories only open read-only, and never for creation or
+         * truncation (Linux: EISDIR for all three). */
+        if (accmode != O_RDONLY || (flags & (O_CREAT | O_TRUNC)) != 0) {
+            mutex_unlock(&fs_lock);
             return -EISDIR;
         }
     } else {
         if ((flags & O_DIRECTORY) != 0) {
+            mutex_unlock(&fs_lock);
             return -ENOTDIR;
         }
-        if (accmode != O_RDONLY) {
-            return -EROFS; /* read-only mount until 5d */
+        if ((flags & O_TRUNC) != 0 && node.size > 0) {
+            /* Linux honors O_TRUNC regardless of the access mode. */
+            rc = gfs_truncate(root_fs, id, 0);
+            if (rc != GFS_OK) {
+                mutex_unlock(&fs_lock);
+                return gfs_errno(rc);
+            }
         }
     }
     const struct file_ops *ops = (node.type == GFS_NODE_NAMESPACE) ? &GFS_DIR_OPS : &GFS_FILE_OPS;
     struct file *f = file_alloc(ops, id, flags);
     if (f == NULL) {
+        mutex_unlock(&fs_lock);
         return -ENOMEM;
     }
+    node_opens[id]++;
+    mutex_unlock(&fs_lock);
     *out = f;
     return 0;
 }
@@ -331,9 +458,12 @@ static const struct mount MOUNTS[] = {
     {"/dev", 4, devfs_open},
 };
 
-long vfs_open(const char *path, int flags, struct file **out) {
-    if ((flags & ~(O_ACCMODE | O_DIRECTORY)) != 0) {
-        return -EINVAL; /* no O_CREAT and friends until the write path */
+long vfs_open(const char *path, int flags, unsigned mode, struct file **out) {
+    if ((flags & ~(O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_APPEND | O_DIRECTORY)) != 0) {
+        return -EINVAL; /* unimplemented flags are refused, not ignored */
+    }
+    if ((flags & O_DIRECTORY) != 0 && (flags & O_CREAT) != 0) {
+        return -EINVAL; /* as Linux: O_DIRECTORY cannot create */
     }
     char canon[VFS_PATH_MAX];
     long rc = vfs_path_norm(path, canon, sizeof(canon));
@@ -351,7 +481,230 @@ long vfs_open(const char *path, int flags, struct file **out) {
             return m->open(rel, flags, out);
         }
     }
-    return gfs_open(canon, flags, out);
+    return gfs_open(canon, flags, mode, out);
+}
+
+/* ---- namespace mutation ---- */
+
+/* Nonzero when the canonical path belongs to the devfs mount. */
+static int on_devfs(const char *canon) {
+    return strcmp(canon, "/dev") == 0 || strncmp(canon, "/dev/", 5) == 0;
+}
+
+/* Resolve the parent directory of `canon` and look up its final
+ * component, under fs_lock (held by the caller). On success *dir_out
+ * is the parent's node id, *id_out and *node_out describe the target, and
+ * *name_out points at the final component inside `canon`. */
+static int gfs_locate(const char *canon, char *parentbuf, uint64_t *dir_out, const char **name_out,
+                      uint64_t *id_out, struct gfs_node *node_out) {
+    path_split(canon, parentbuf, name_out);
+    int rc = gfs_resolve(root_fs, parentbuf, dir_out);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    rc = gfs_lookup(root_fs, *dir_out, *name_out, id_out);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    return gfs_node_get(root_fs, *id_out, node_out);
+}
+
+long vfs_mkdir(const char *path, unsigned mode) {
+    char canon[VFS_PATH_MAX];
+    long rc = vfs_path_norm(path, canon, sizeof(canon));
+    if (rc != 0) {
+        return rc;
+    }
+    if (strcmp(canon, "/") == 0 || strcmp(canon, "/dev") == 0) {
+        return -EEXIST;
+    }
+    if (on_devfs(canon)) {
+        return -EPERM; /* devfs is structurally immutable */
+    }
+    char parent[VFS_PATH_MAX];
+    const char *name = NULL;
+    path_split(canon, parent, &name);
+    mutex_lock(&fs_lock);
+    uint64_t dir = 0;
+    int grc = gfs_resolve(root_fs, parent, &dir);
+    if (grc == GFS_OK) {
+        uint64_t id = 0;
+        grc = gfs_create_at(root_fs, dir, name, GFS_NODE_NAMESPACE, mode & 07777u, &id);
+    }
+    mutex_unlock(&fs_lock);
+    return gfs_errno(grc);
+}
+
+long vfs_unlink(const char *path) {
+    char canon[VFS_PATH_MAX];
+    long rc = vfs_path_norm(path, canon, sizeof(canon));
+    if (rc != 0) {
+        return rc;
+    }
+    if (strcmp(canon, "/") == 0 || strcmp(canon, "/dev") == 0) {
+        return -EISDIR; /* unlink(2) never removes a directory */
+    }
+    if (on_devfs(canon)) {
+        return -EPERM;
+    }
+    char parent[VFS_PATH_MAX];
+    const char *name = NULL;
+    uint64_t dir = 0;
+    uint64_t id = 0;
+    struct gfs_node node;
+    mutex_lock(&fs_lock);
+    int grc = gfs_locate(canon, parent, &dir, &name, &id, &node);
+    if (grc != GFS_OK) {
+        mutex_unlock(&fs_lock);
+        return gfs_errno(grc);
+    }
+    if (node.type == GFS_NODE_NAMESPACE) {
+        mutex_unlock(&fs_lock);
+        return -EISDIR;
+    }
+    if (node.nlink == 1 && node_opens[id] > 0) {
+        /* Removing the last name of an open file would free a node
+         * an fd still references — the pinned v1 -EBUSY policy. */
+        mutex_unlock(&fs_lock);
+        return -EBUSY;
+    }
+    grc = gfs_unlink(root_fs, dir, name);
+    mutex_unlock(&fs_lock);
+    return gfs_errno(grc);
+}
+
+long vfs_rmdir(const char *path) {
+    char canon[VFS_PATH_MAX];
+    long rc = vfs_path_norm(path, canon, sizeof(canon));
+    if (rc != 0) {
+        return rc;
+    }
+    if (strcmp(canon, "/") == 0 || strcmp(canon, "/dev") == 0) {
+        return -EBUSY; /* the root and mount points are always busy */
+    }
+    if (on_devfs(canon)) {
+        return -EPERM;
+    }
+    char parent[VFS_PATH_MAX];
+    const char *name = NULL;
+    uint64_t dir = 0;
+    uint64_t id = 0;
+    struct gfs_node node;
+    mutex_lock(&fs_lock);
+    int grc = gfs_locate(canon, parent, &dir, &name, &id, &node);
+    if (grc != GFS_OK) {
+        mutex_unlock(&fs_lock);
+        return gfs_errno(grc);
+    }
+    if (node.type != GFS_NODE_NAMESPACE) {
+        mutex_unlock(&fs_lock);
+        return -ENOTDIR;
+    }
+    if (node_opens[id] > 0) {
+        mutex_unlock(&fs_lock);
+        return -EBUSY;
+    }
+    grc = gfs_unlink(root_fs, dir, name); /* core enforces ENOTEMPTY */
+    mutex_unlock(&fs_lock);
+    return gfs_errno(grc);
+}
+
+long vfs_link(const char *oldpath, const char *newpath) {
+    char ocanon[VFS_PATH_MAX];
+    char ncanon[VFS_PATH_MAX];
+    long rc = vfs_path_norm(oldpath, ocanon, sizeof(ocanon));
+    if (rc == 0) {
+        rc = vfs_path_norm(newpath, ncanon, sizeof(ncanon));
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    if (on_devfs(ocanon) || on_devfs(ncanon)) {
+        /* Both on devfs: it cannot grow names. Across the seam: hard
+         * links never span filesystems. */
+        return (on_devfs(ocanon) && on_devfs(ncanon)) ? -EPERM : -EXDEV;
+    }
+    if (strcmp(ncanon, "/") == 0) {
+        return -EEXIST;
+    }
+    char parent[VFS_PATH_MAX];
+    const char *name = NULL;
+    path_split(ncanon, parent, &name);
+    mutex_lock(&fs_lock);
+    uint64_t id = 0;
+    struct gfs_node node;
+    int grc = gfs_resolve(root_fs, ocanon, &id);
+    if (grc == GFS_OK) {
+        grc = gfs_node_get(root_fs, id, &node);
+    }
+    if (grc != GFS_OK) {
+        mutex_unlock(&fs_lock);
+        return gfs_errno(grc);
+    }
+    if (node.type == GFS_NODE_NAMESPACE) {
+        mutex_unlock(&fs_lock);
+        return -EPERM; /* link(2) on a directory, as Linux */
+    }
+    uint64_t dir = 0;
+    grc = gfs_resolve(root_fs, parent, &dir);
+    if (grc == GFS_OK) {
+        grc = gfs_link(root_fs, dir, name, id, GFS_EDGE_NAME);
+    }
+    mutex_unlock(&fs_lock);
+    return gfs_errno(grc);
+}
+
+long vfs_rename(const char *oldpath, const char *newpath) {
+    char ocanon[VFS_PATH_MAX];
+    char ncanon[VFS_PATH_MAX];
+    long rc = vfs_path_norm(oldpath, ocanon, sizeof(ocanon));
+    if (rc == 0) {
+        rc = vfs_path_norm(newpath, ncanon, sizeof(ncanon));
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    if (strcmp(ocanon, "/") == 0 || strcmp(ocanon, "/dev") == 0 || strcmp(ncanon, "/") == 0 ||
+        strcmp(ncanon, "/dev") == 0) {
+        return -EBUSY;
+    }
+    if (on_devfs(ocanon) || on_devfs(ncanon)) {
+        return (on_devfs(ocanon) && on_devfs(ncanon)) ? -EPERM : -EXDEV;
+    }
+    char oparent[VFS_PATH_MAX];
+    char nparent[VFS_PATH_MAX];
+    const char *oname = NULL;
+    const char *nname = NULL;
+    path_split(ocanon, oparent, &oname);
+    path_split(ncanon, nparent, &nname);
+    mutex_lock(&fs_lock);
+    uint64_t odir = 0;
+    uint64_t ndir = 0;
+    int grc = gfs_resolve(root_fs, oparent, &odir);
+    if (grc == GFS_OK) {
+        grc = gfs_resolve(root_fs, nparent, &ndir);
+    }
+    if (grc != GFS_OK) {
+        mutex_unlock(&fs_lock);
+        return gfs_errno(grc);
+    }
+    /* Replacing an open object would free a node an fd references —
+     * unless source and target are the same node (then rename is a
+     * no-op and nothing is freed). */
+    uint64_t src = 0;
+    uint64_t dst = 0;
+    if (gfs_lookup(root_fs, odir, oname, &src) == GFS_OK &&
+        gfs_lookup(root_fs, ndir, nname, &dst) == GFS_OK && dst != src) {
+        struct gfs_node dnode;
+        if (gfs_node_get(root_fs, dst, &dnode) == GFS_OK &&
+            (dnode.type == GFS_NODE_NAMESPACE || dnode.nlink == 1) && node_opens[dst] > 0) {
+            mutex_unlock(&fs_lock);
+            return -EBUSY;
+        }
+    }
+    grc = gfs_rename(root_fs, odir, oname, ndir, nname);
+    mutex_unlock(&fs_lock);
+    return gfs_errno(grc);
 }
 
 long vfs_read_file(const char *path, void **buf_out, uint64_t *size_out) {
@@ -397,6 +750,14 @@ long vfs_read_file(const char *path, void **buf_out, uint64_t *size_out) {
     return 0;
 }
 
+void vfs_stats(uint64_t *generation, uint64_t *free_blocks, uint64_t *free_nodes) {
+    mutex_lock(&fs_lock);
+    *generation = root_fs->generation;
+    *free_blocks = root_fs->free_blocks;
+    *free_nodes = root_fs->free_nodes;
+    mutex_unlock(&fs_lock);
+}
+
 void vfs_init(void) {
     struct bdev *bd = block_root();
     if (bd == NULL) {
@@ -406,13 +767,21 @@ void vfs_init(void) {
     if (root_fs == NULL) {
         panic("vfs: out of memory for the root mount");
     }
-    /* Read-only mount: no allocator bitmaps needed (5d turns on the
-     * write path and mounts writable). */
-    int rc = gfs_mount(root_fs, &GDEV_OPS, bd, 0, NULL, 0);
+    /* Writable mount: the CoW allocator needs its two bitmap copies. */
+    size_t work_len = gfs_mount_work_size(bd->nblocks);
+    void *work = kmalloc(work_len);
+    if (work == NULL) {
+        panic("vfs: out of memory for the allocator bitmaps");
+    }
+    int rc = gfs_mount(root_fs, &GDEV_OPS, bd, 1, work, work_len);
     if (rc != GFS_OK) {
         panic("vfs: mounting graphfs on %s: %s", bd->name, gfs_strerror(rc));
     }
-    kprintf("vfs: graphfs root mounted ro (gen %llu, %llu/%llu blocks free, %llu/%llu nodes "
+    node_opens = kzalloc((size_t)root_fs->node_count * sizeof(node_opens[0]));
+    if (node_opens == NULL) {
+        panic("vfs: out of memory for the open-node table");
+    }
+    kprintf("vfs: graphfs root mounted rw (gen %llu, %llu/%llu blocks free, %llu/%llu nodes "
             "free)\n",
             (unsigned long long)root_fs->generation, (unsigned long long)root_fs->free_blocks,
             (unsigned long long)root_fs->total_blocks, (unsigned long long)root_fs->free_nodes,

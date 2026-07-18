@@ -9,8 +9,9 @@
  * and get the syscall frame where they need the full user context.
  *
  * A NULL file-op slot maps to the conventional errno per operation:
- * read -EINVAL, write -EBADF (read-only open), lseek -ESPIPE,
- * getdents64 -ENOTDIR.
+ * read -EINVAL, write -EBADF, lseek -ESPIPE, getdents64 -ENOTDIR,
+ * fsync -EINVAL. Access-mode enforcement (may *this description*
+ * read or write?) lives inside the ops, not here.
  */
 #include <syscall.h>
 
@@ -66,14 +67,13 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count) {
 }
 
 static uint64_t sys_open(uint64_t upath, uint64_t flags, uint64_t mode) {
-    (void)mode; /* meaningful with O_CREAT, which needs the 5d write path */
     char path[VFS_PATH_MAX];
     long rc = user_strncpy(path, upath, sizeof(path));
     if (rc < 0) {
         return (uint64_t)rc;
     }
     struct file *f = NULL;
-    rc = vfs_open(path, (int)flags, &f);
+    rc = vfs_open(path, (int)flags, (unsigned)mode, &f);
     if (rc != 0) {
         return (uint64_t)rc;
     }
@@ -113,6 +113,70 @@ static uint64_t sys_lseek(uint64_t fd, uint64_t off, uint64_t whence) {
         return ERR(ESPIPE);
     }
     return (uint64_t)f->ops->lseek(f, (int64_t)off, (int)whence);
+}
+
+static uint64_t sys_fsync(uint64_t fd) {
+    struct file *f = process_file_get((int)fd);
+    if (f == NULL) {
+        return ERR(EBADF);
+    }
+    if (f->ops->fsync == NULL) {
+        return ERR(EINVAL); /* special file with nothing to sync */
+    }
+    return (uint64_t)f->ops->fsync(f);
+}
+
+static uint64_t sys_mkdir(uint64_t upath, uint64_t mode) {
+    char path[VFS_PATH_MAX];
+    long rc = user_strncpy(path, upath, sizeof(path));
+    if (rc < 0) {
+        return (uint64_t)rc;
+    }
+    return (uint64_t)vfs_mkdir(path, (unsigned)mode);
+}
+
+static uint64_t sys_rmdir(uint64_t upath) {
+    char path[VFS_PATH_MAX];
+    long rc = user_strncpy(path, upath, sizeof(path));
+    if (rc < 0) {
+        return (uint64_t)rc;
+    }
+    return (uint64_t)vfs_rmdir(path);
+}
+
+static uint64_t sys_unlink(uint64_t upath) {
+    char path[VFS_PATH_MAX];
+    long rc = user_strncpy(path, upath, sizeof(path));
+    if (rc < 0) {
+        return (uint64_t)rc;
+    }
+    return (uint64_t)vfs_unlink(path);
+}
+
+static uint64_t sys_link(uint64_t uold, uint64_t unew) {
+    char oldp[VFS_PATH_MAX];
+    char newp[VFS_PATH_MAX];
+    long rc = user_strncpy(oldp, uold, sizeof(oldp));
+    if (rc >= 0) {
+        rc = user_strncpy(newp, unew, sizeof(newp));
+    }
+    if (rc < 0) {
+        return (uint64_t)rc;
+    }
+    return (uint64_t)vfs_link(oldp, newp);
+}
+
+static uint64_t sys_rename(uint64_t uold, uint64_t unew) {
+    char oldp[VFS_PATH_MAX];
+    char newp[VFS_PATH_MAX];
+    long rc = user_strncpy(oldp, uold, sizeof(oldp));
+    if (rc >= 0) {
+        rc = user_strncpy(newp, unew, sizeof(newp));
+    }
+    if (rc < 0) {
+        return (uint64_t)rc;
+    }
+    return (uint64_t)vfs_rename(oldp, newp);
 }
 
 static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count) {
@@ -161,6 +225,24 @@ void syscall_dispatch(struct syscall_frame *frame) {
     case SYS_wait4:
         frame->rax =
             (uint64_t)process_wait4((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10);
+        return;
+    case SYS_fsync:
+        frame->rax = sys_fsync(frame->rdi);
+        return;
+    case SYS_rename:
+        frame->rax = sys_rename(frame->rdi, frame->rsi);
+        return;
+    case SYS_mkdir:
+        frame->rax = sys_mkdir(frame->rdi, frame->rsi);
+        return;
+    case SYS_rmdir:
+        frame->rax = sys_rmdir(frame->rdi);
+        return;
+    case SYS_link:
+        frame->rax = sys_link(frame->rdi, frame->rsi);
+        return;
+    case SYS_unlink:
+        frame->rax = sys_unlink(frame->rdi);
         return;
     case SYS_getdents64:
         frame->rax = sys_getdents64(frame->rdi, frame->rsi, frame->rdx);

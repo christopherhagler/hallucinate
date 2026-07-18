@@ -1044,15 +1044,9 @@ long gfs_read(struct gfs *fs, uint64_t id, uint64_t off, void *buf, size_t len) 
 
 /* ---- writing ----------------------------------------------------------- */
 
-int gfs_node_create(struct gfs *fs, uint32_t type, uint32_t mode, uint64_t *out) {
-    if (type != GFS_NODE_NAMESPACE && type != GFS_NODE_DATA) {
-        return GFS_EINVAL;
-    }
-    int rc = txn_begin(fs);
-    if (rc != GFS_OK) {
-        return rc;
-    }
-    /* Find a FREE id (skip id 0). */
+/* Find a FREE node id (skip id 0) through the working map. Runs inside
+ * a transaction; uses fs->tbl. */
+static int node_find_free(struct gfs *fs, uint64_t *out) {
     uint64_t id = 0;
     for (uint64_t bi = 0; bi * GFS_NODES_PER_BLOCK < fs->node_count && id == 0; bi++) {
         struct gfs_bp bp = map_get(fs, bi);
@@ -1061,7 +1055,7 @@ int gfs_node_create(struct gfs *fs, uint32_t type, uint32_t mode, uint64_t *out)
             id = base == 0 ? 1 : base;
             break;
         }
-        rc = read_meta(fs, bp, fs->tbl);
+        int rc = read_meta(fs, bp, fs->tbl);
         if (rc != GFS_OK) {
             return rc;
         }
@@ -1078,6 +1072,23 @@ int gfs_node_create(struct gfs *fs, uint32_t type, uint32_t mode, uint64_t *out)
     }
     if (id == 0 || id >= fs->node_count) {
         return GFS_ENOSPC;
+    }
+    *out = id;
+    return GFS_OK;
+}
+
+int gfs_node_create(struct gfs *fs, uint32_t type, uint32_t mode, uint64_t *out) {
+    if (type != GFS_NODE_NAMESPACE && type != GFS_NODE_DATA) {
+        return GFS_EINVAL;
+    }
+    int rc = txn_begin(fs);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    uint64_t id;
+    rc = node_find_free(fs, &id);
+    if (rc != GFS_OK) {
+        return rc;
     }
 
     struct disk_node n = {0};
@@ -1353,6 +1364,332 @@ long gfs_write(struct gfs *fs, uint64_t id, uint64_t off, const void *buf, size_
     return (long)len;
 }
 
+int gfs_create_at(struct gfs *fs, uint64_t dir, const char *name, uint32_t type, uint32_t mode,
+                  uint64_t *out) {
+    if (type != GFS_NODE_NAMESPACE && type != GFS_NODE_DATA) {
+        return GFS_EINVAL;
+    }
+    uint32_t namelen;
+    int rc = name_len_ok(name, &namelen);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    rc = txn_begin(fs);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    struct disk_node d;
+    rc = node_read(fs, dir, &d);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    if (d.type != GFS_NODE_NAMESPACE) {
+        return GFS_ENOTDIR;
+    }
+    uint64_t dummy;
+    rc = edge_lookup(fs, &d, name, namelen, &dummy);
+    if (rc == GFS_OK) {
+        return GFS_EEXIST;
+    }
+    if (rc != GFS_ENOENT) {
+        return rc;
+    }
+    uint64_t id;
+    rc = node_find_free(fs, &id);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    /* The node is born linked: nlink 1 and (for a namespace) its parent
+     * set, so no committed state ever holds an orphan. */
+    struct disk_node n = {0};
+    n.type = type;
+    n.mode = mode;
+    n.nlink = 1;
+    n.parent = (type == GFS_NODE_NAMESPACE) ? dir : 0;
+    rc = node_write(fs, id, &n);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    rc = edge_add(fs, &d, GFS_EDGE_NAME, id, name, namelen);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    rc = node_write(fs, dir, &d);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    rc = txn_commit(fs, -1);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    *out = id;
+    return GFS_OK;
+}
+
+int gfs_rename(struct gfs *fs, uint64_t olddir, const char *oldname, uint64_t newdir,
+               const char *newname) {
+    uint32_t olen;
+    uint32_t nlen;
+    int rc = name_len_ok(oldname, &olen);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    rc = name_len_ok(newname, &nlen);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    rc = txn_begin(fs);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+
+    /* When both names live in one directory, `od` plays both roles —
+     * two structs for the same node would clobber each other's edits. */
+    int same_dir = (olddir == newdir);
+    struct disk_node od;
+    struct disk_node ndn;
+    rc = node_read(fs, olddir, &od);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    if (od.type != GFS_NODE_NAMESPACE) {
+        return GFS_ENOTDIR;
+    }
+    if (!same_dir) {
+        rc = node_read(fs, newdir, &ndn);
+        if (rc != GFS_OK) {
+            return rc;
+        }
+        if (ndn.type != GFS_NODE_NAMESPACE) {
+            return GFS_ENOTDIR;
+        }
+    }
+    struct disk_node *nd = same_dir ? &od : &ndn;
+
+    uint64_t src;
+    rc = edge_lookup(fs, &od, oldname, olen, &src);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    struct disk_node sn;
+    rc = node_read(fs, src, &sn);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+
+    /* A namespace must not move under itself or its own descendants —
+     * that would detach a whole subtree into an unreachable cycle. Walk
+     * newdir's single-parent chain to the root looking for the source. */
+    if (sn.type == GFS_NODE_NAMESPACE && !same_dir) {
+        uint64_t cur = newdir;
+        uint64_t guard = 0;
+        while (cur != fs->root_node) {
+            if (cur == src) {
+                return GFS_EINVAL;
+            }
+            if (guard++ > fs->node_count) {
+                return GFS_ECORRUPT; /* parent chain never reached the root */
+            }
+            struct disk_node walk;
+            rc = node_read(fs, cur, &walk);
+            if (rc != GFS_OK) {
+                return rc;
+            }
+            cur = walk.parent;
+        }
+    }
+
+    uint64_t dst = 0;
+    int have_dst = 0;
+    rc = edge_lookup(fs, nd, newname, nlen, &dst);
+    if (rc == GFS_OK) {
+        have_dst = 1;
+    } else if (rc != GFS_ENOENT) {
+        return rc;
+    }
+    if (have_dst && dst == src) {
+        /* Two hard links to one node (or the identical path): POSIX
+         * says do nothing. Nothing was written, so just walk away. */
+        return GFS_OK;
+    }
+    struct disk_node dn;
+    long nodes_delta = 0;
+    if (have_dst) {
+        rc = node_read(fs, dst, &dn);
+        if (rc != GFS_OK) {
+            return rc;
+        }
+        if (sn.type == GFS_NODE_NAMESPACE) {
+            if (dn.type != GFS_NODE_NAMESPACE) {
+                return GFS_ENOTDIR;
+            }
+            if (dn.edge_count > 0) {
+                return GFS_ENOTEMPTY;
+            }
+        } else if (dn.type == GFS_NODE_NAMESPACE) {
+            return GFS_EISDIR;
+        }
+    }
+
+    /* All checks passed; mutate. Edge surgery first (it only touches
+     * edge blocks and the in-memory directory structs), node records
+     * last — every node_write re-reads its table block through the
+     * working map, so sequential writes to one block compose. */
+    uint64_t removed;
+    rc = edge_remove_name(fs, &od, oldname, olen, &removed);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    if (have_dst) {
+        rc = edge_remove_name(fs, nd, newname, nlen, &removed);
+        if (rc != GFS_OK) {
+            return rc;
+        }
+        dn.nlink--;
+        if (dn.nlink == 0) {
+            for (uint32_t k = 0; k < dn.n_extents; k++) {
+                for (uint32_t j = 0; j < dn.ext[k].len; j++) {
+                    free_block(fs, dn.ext[k].phys + j);
+                }
+            }
+            rc = edge_chain_free(fs, dn.edge_head);
+            if (rc != GFS_OK) {
+                return rc;
+            }
+            struct disk_node freed = {0};
+            freed.type = GFS_NODE_FREE;
+            rc = node_write(fs, dst, &freed);
+            if (rc != GFS_OK) {
+                return rc;
+            }
+            nodes_delta = 1;
+        } else {
+            rc = node_write(fs, dst, &dn);
+            if (rc != GFS_OK) {
+                return rc;
+            }
+        }
+    }
+    rc = edge_add(fs, nd, GFS_EDGE_NAME, src, newname, nlen);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    if (sn.type == GFS_NODE_NAMESPACE && sn.parent != newdir) {
+        sn.parent = newdir;
+        rc = node_write(fs, src, &sn);
+        if (rc != GFS_OK) {
+            return rc;
+        }
+    }
+    rc = node_write(fs, olddir, &od);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    if (!same_dir) {
+        rc = node_write(fs, newdir, &ndn);
+        if (rc != GFS_OK) {
+            return rc;
+        }
+    }
+    return txn_commit(fs, nodes_delta);
+}
+
+int gfs_truncate(struct gfs *fs, uint64_t id, uint64_t size) {
+    if (size > GFS_MAX_FILE_SIZE) {
+        return GFS_EFBIG;
+    }
+    int rc = txn_begin(fs);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    struct disk_node n;
+    rc = node_read(fs, id, &n);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    if (n.type == GFS_NODE_FREE) {
+        return GFS_ENOENT;
+    }
+    if (n.type != GFS_NODE_DATA) {
+        return GFS_EISDIR;
+    }
+    if (size == n.size) {
+        return GFS_OK; /* nothing written yet: safe to abandon */
+    }
+
+    if (size < n.size) {
+        /* Drop or trim every extent past the new end. */
+        uint64_t keep = (size + GFS_BLOCK_SIZE - 1) / GFS_BLOCK_SIZE;
+        uint32_t out = 0;
+        for (uint32_t k = 0; k < n.n_extents; k++) {
+            struct gfs_extent e = n.ext[k];
+            if (e.logical >= keep) {
+                for (uint32_t j = 0; j < e.len; j++) {
+                    free_block(fs, e.phys + j);
+                }
+                continue;
+            }
+            if (e.logical + e.len > keep) {
+                uint32_t klen = (uint32_t)(keep - e.logical);
+                for (uint32_t j = klen; j < e.len; j++) {
+                    free_block(fs, e.phys + j);
+                }
+                e.len = klen;
+            }
+            n.ext[out++] = e;
+        }
+        n.n_extents = out;
+
+        /* Zero the tail of a kept partial last block (CoW, like every
+         * data write) so a later extension reads zeros, never the old
+         * bytes. This maintains the invariant fsck checks: bytes past
+         * EOF inside the last block are always zero. */
+        uint32_t tail = (uint32_t)(size % GFS_BLOCK_SIZE);
+        if (tail != 0) {
+            uint64_t lbn = size / GFS_BLOCK_SIZE;
+            uint64_t oldp = bmap(&n, lbn);
+            if (oldp != 0) {
+                rc = bread(fs, oldp, fs->b);
+                if (rc != GFS_OK) {
+                    return rc;
+                }
+                memset(fs->b + tail, 0, GFS_BLOCK_SIZE - tail);
+                uint64_t np;
+                rc = alloc_block(fs, &np);
+                if (rc != GFS_OK) {
+                    return rc;
+                }
+                rc = bwrite(fs, np, fs->b);
+                if (rc != GFS_OK) {
+                    return rc;
+                }
+                free_block(fs, oldp);
+                /* Repoint lbn — the *last* block of the trimmed file, so
+                 * it is the final block of the final extent. */
+                struct gfs_extent *last = &n.ext[n.n_extents - 1];
+                if (last->len == 1) {
+                    last->phys = np;
+                } else {
+                    if (n.n_extents == GFS_INLINE_EXTENTS) {
+                        return GFS_EFRAG;
+                    }
+                    last->len--;
+                    n.ext[n.n_extents].logical = lbn;
+                    n.ext[n.n_extents].phys = np;
+                    n.ext[n.n_extents].len = 1;
+                    n.n_extents++;
+                }
+            }
+        }
+    }
+    n.size = size;
+    rc = node_write(fs, id, &n);
+    if (rc != GFS_OK) {
+        return rc;
+    }
+    return txn_commit(fs, 0);
+}
+
 /* ---- fsck -------------------------------------------------------------- */
 
 struct fsck_ctx {
@@ -1504,6 +1841,28 @@ int gfs_fsck(struct gfs *fs, void *work, size_t work_len,
             }
             if (seen != n.edge_count) {
                 fsck_err(&c, "node %llu edge_count %llu", id, n.edge_count);
+            }
+            /* DATA nodes: no extent addresses blocks past EOF, and the
+             * bytes past EOF inside a partial last block are zero (the
+             * write and truncate paths maintain this so extending a
+             * file exposes zeros, never stale data). */
+            if (n.type == GFS_NODE_DATA) {
+                uint64_t nblocks = (n.size + GFS_BLOCK_SIZE - 1) / GFS_BLOCK_SIZE;
+                for (uint32_t e = 0; e < n.n_extents; e++) {
+                    if (n.ext[e].logical + n.ext[e].len > nblocks) {
+                        fsck_err(&c, "node %llu maps blocks past eof", id, 0);
+                    }
+                }
+                uint32_t tail = (uint32_t)(n.size % GFS_BLOCK_SIZE);
+                uint64_t lastp = (tail != 0) ? bmap(&n, n.size / GFS_BLOCK_SIZE) : 0;
+                if (lastp != 0 && bread(fs, lastp, eb) == GFS_OK) {
+                    for (uint32_t b = tail; b < GFS_BLOCK_SIZE; b++) {
+                        if (eb[b] != 0) {
+                            fsck_err(&c, "node %llu stale bytes past eof", id, 0);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }

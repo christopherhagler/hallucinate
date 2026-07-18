@@ -184,12 +184,13 @@ check: check-host check-boot check-fsck
 check-host: $(BUILD)/host_tests
 	$(BUILD)/host_tests
 
-check-boot: $(BUILD)/disk.img $(BUILD)/fs.img tests/run_qemu.py
+check-boot: $(BUILD)/disk.img $(BUILD)/fs.img $(BUILD)/graphfs_fsck tests/run_qemu.py
 	$(PY) tests/run_qemu.py --image $(BUILD)/disk.img --fsimg $(BUILD)/fs.img \
-	    --qemu $(QEMU)
+	    --fsck $(BUILD)/graphfs_fsck --qemu $(QEMU)
 
-# Verify the freshly built filesystem image is structurally sound: the same
-# fsck the crash-consistency gate will run after boot (5d).
+# Verify the freshly built filesystem image is structurally sound — and after
+# every boot test, run_qemu.py re-runs the same fsck on the image the guest
+# wrote to, so the write path is crash-consistency-checked on every `make check`.
 check-fsck: $(BUILD)/fs.img $(BUILD)/graphfs_fsck
 	$(BUILD)/graphfs_fsck $(BUILD)/fs.img
 

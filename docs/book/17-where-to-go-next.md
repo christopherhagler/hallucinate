@@ -14,14 +14,14 @@ how to keep growing.
 The roadmap (README) runs to phase 10, and each remaining phase is a chance to
 learn a major subsystem:
 
-- **Finish Phase 5 — the VFS.** The filesystem core exists; the next slices add a
-  virtual filesystem layer (a `struct file`, fd tables, `open`/`read`/`close`/
-  `fstat`/`lseek`/`getdents64`), a device filesystem, and *exec-from-disk* — at
-  which point the embedded program blob from Chapter 11 disappears and the kernel
-  loads `/bin/init` off graphfs. Then the write path and a fsck-after-boot
-  crash-consistency gate. Building a VFS teaches you the art of the *right
-  abstraction*: one interface over graphfs, devfs, and eventually a network
-  filesystem, without leaking any of their differences upward.
+- **Round out the filesystem.** Phase 5 is complete — VFS, devfs,
+  exec-from-disk, and the full write path with its fsck-after-boot gate — but
+  the deferred conveniences are exactly the right size for solo practice:
+  `chdir` and real relative paths, `dup`/`dup2` and `O_CLOEXEC`, `ftruncate`,
+  a `mount(2)` syscall over the compile-time table, POSIX unlink-while-open
+  semantics (on-disk orphan tracking — study how ext4's orphan list survives
+  a crash first). Each one touches an interface the earlier chapters pinned,
+  so you will feel exactly what the pinning bought.
 - **Phase 6 — AI as a system service.** A privileged userspace daemon bridged to
   a host-side helper over virtio-serial, exposed to every process via `/dev/ai`
   and dedicated syscalls. This is where the `TAG`/`REF` edges designed into

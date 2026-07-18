@@ -519,7 +519,7 @@ void process_run_init(void) {
     /* Init starts with the console on 0/1/2: one description, three
      * references — exactly what a login shell would inherit. */
     struct file *con = NULL;
-    rc = vfs_open("/dev/console", O_RDWR, &con);
+    rc = vfs_open("/dev/console", O_RDWR, 0, &con);
     if (rc != 0) {
         panic("process: cannot open /dev/console: %lld", (long long)rc);
     }

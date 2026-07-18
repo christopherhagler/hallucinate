@@ -79,7 +79,7 @@ Two structural decisions shape almost every chapter, so learn them now:
 | 11 | [ELF Loading and Processes](11-processes.md) | fork, execve, wait4, exit, and killing a process without killing the kernel |
 | 12 | [Storage: PCI, virtio, and the Block Layer](12-storage.md) | Enumerating a bus, driving a paravirtual device, caching blocks |
 | 13 | [graphfs: A Filesystem From First Principles](13-graphfs.md) | Copy-on-write, self-checksumming, and designing an on-disk format |
-| 14 | [The VFS: One Namespace Over Many Filesystems](14-vfs.md) | Open files, fd tables, devfs, the kernel's first sleeping lock, and exec from disk |
+| 14 | [The VFS: One Namespace Over Many Filesystems](14-vfs.md) | Open files, fd tables, devfs, the first sleeping lock, exec from disk, and the write path |
 | 15 | [Testing and Professional Discipline](15-testing-and-discipline.md) | The three-level test strategy, and how to make systems code testable |
 | 16 | [How an OS Actually Gets Built](16-how-an-os-gets-built.md) | The commit ledger as a decision journal: slices, gates, hooks, and the definition of done |
 | 17 | [Where to Go Next](17-where-to-go-next.md) | The road from here to a self-hosting, AI-native OS |
@@ -2772,7 +2772,7 @@ The VFS (`kernel/fs/vfs.c`) is built from three small objects, each with one job
   tables, and everything above them dispatches through the pointer without a
   single `if (is_device)` anywhere in the syscall layer. A `NULL` slot means "this
   operation does not apply here," and the syscall layer maps it to the
-  conventional errno — `write` on a read-only file is `-EBADF`, `lseek` on the
+  conventional errno — `write` on a directory is `-EBADF`, `lseek` on the
   console is `-ESPIPE`, `getdents64` on a regular file is `-ENOTDIR`. The error
   vocabulary is part of the interface, decided once, at the boundary.
 - **`struct file`** — an *open file description*, the POSIX term worth being
@@ -2904,18 +2904,58 @@ read side — checks 21 through 47 open a known file and verify its ELF magic,
 prove `lseek END/SET` against `fstat`'s size, walk `/bin` with `getdents64` and
 require *exactly* `.`, `..`, `init`, `hello` and nothing else, then probe every
 error contract: `-ENOENT` for a missing name, `-ENOTDIR` for a path through a
-file, `-EISDIR` for reading a directory, `-EROFS` for opening anything on disk
-for write (the mount is read-only until 5d), `-EBADF` after close, `-ESPIPE`
+file, `-EISDIR` for reading a directory, `-EBADF` after close, `-ESPIPE`
 for seeking the console. A path like `/dev/../bin/./hello` must resolve — the
 normalizer's host tests re-proven end-to-end from ring 3. The exit status names
-the first failure; the boot test asserts 27 serial markers and `status 0`.
+the first failure; the boot test asserts the serial markers and `status 0`.
 
-The read side of a filesystem is the half you can prove without being able to
-mutate anything; the write path (`write`, `mkdir`, `link`, `unlink`, `rename`,
-`fsync`) is slice 5d, where the fsck-after-boot gate turns every future boot
-test into a crash-consistency test.
+## 14.7 The write path: teaching the namespace to change
 
-## 14.7 The transferable lessons
+The read side is the half you can prove without being able to mutate anything.
+Slice 5d mounts the root writable and adds the other half — `write`, `O_CREAT`
+and friends, `mkdir`/`rmdir`, `link`/`unlink`, `rename`, `fsync` — and three
+of its decisions are worth studying, because each one is a *policy* forced to
+the surface by an invariant.
+
+**Creation is atomic because fsck says so.** The graphfs core had
+`gfs_node_create` and `gfs_link` since slice 5b, and composing them would
+implement `mkdir` in two calls — with a crash window between them that leaves
+an allocated, unreferenced node. For a directory, that orphan is precisely
+what `gfs_fsck` flags as corruption ("namespace has 0 parents"). So the core
+grew `gfs_create_at`: create *and* link in one transaction, the node born
+with its name. The checker defined what the mutation path was allowed to look
+like — write your verifier first and it will design your API.
+
+**Unlinking an open file is `-EBUSY`, and the deviation is pinned.** POSIX
+keeps an unlinked-but-open file alive until its last close. Honoring that
+means on-disk orphan tracking (the node must survive a crash between unlink
+and close without leaking), which is real machinery for semantics nothing in
+this system needs yet. The alternatives were: implement it, leak nodes across
+crashes, or — worst — free the node while an fd still points at it and let
+the id be reused under a live file description. The kernel refuses exactly
+the dangerous case (`nlink == 1` and open descriptions exist), documents the
+deviation where the contract lives, and notes what will lift it (Phase 7).
+Hard links keep the common temp-file shapes expressible. A documented honest
+"no" beats a silent wrong "yes."
+
+**Rename's cycle check rides on the namespace invariant.** Moving `/a` into
+`/a/b/c` would detach a subtree into an unreachable cycle. Detecting that in
+a general graph means a reachability walk; in graphfs v1 it is a loop over
+single-parent fields from the destination up to the root — cheap because the
+5b policy decision ("namespaces have exactly one parent") already paid for
+it. Invariants compound: `..` as one field, no cycles possible, and now an
+O(depth) rename guard, all from the same choice.
+
+And the gate promised in 5c arrives: after every boot test, `run_qemu.py`
+runs `graphfs_fsck` over the image the guest actually wrote — the block
+selftest, the in-kernel stress cycles (create/write/rename/unlink with
+free-space accounting asserted back to the starting counts), and init's
+write-path checks (48 through 85, from `O_CREAT|O_EXCL` through the
+`-EBUSY`/`-EXDEV`/`-ENOTEMPTY` vocabulary, in a scratch tree init removes
+without a trace). Every `make check` is now a crash-consistency test of the
+write path, forever.
+
+## 14.8 The transferable lessons
 
 - **An ops vtable plus a refcounted description is the whole VFS trick.** Four
   ops tables, one dispatch site, POSIX offset-sharing from one refcount — no
@@ -2934,11 +2974,20 @@ test into a crash-consistency test.
   Collect patterns, not incidents.
 - **Let the acceptance suite grow with the surface.** Every new syscall landed
   with checks a boot cannot pass without executing them.
+- **Let the checker design the mutation.** `gfs_create_at` exists because
+  fsck's definition of a healthy image made two-call creation wrong; the
+  verifier was the design document.
+- **Deviate loudly or not at all.** The `-EBUSY` unlink policy is a
+  deliberate, written-down departure from POSIX with its lifting condition
+  named — the opposite of a quiet shortcut.
 
-The kernel now walks one namespace from `/` to devices and disk files, and
-nothing it runs is embedded in it. What remains of Phase 5 is teaching the
-namespace to change — the write path — with the crash-consistency gate that
-graphfs's copy-on-write design was built to pass.
+The kernel now walks one namespace from `/` to devices and disk files,
+nothing it runs is embedded in it, and the namespace changes under it —
+created, written, linked, renamed, unlinked — while every boot proves the
+disk image stayed perfectly consistent. Phase 5 is complete: the storage
+stack runs from PCI enumeration to POSIX semantics, and the crash-consistency
+gate graphfs's copy-on-write design was built to pass now runs on every
+`make check`.
 
 <div style="page-break-after: always"></div>
 
@@ -3397,8 +3446,8 @@ One more thing the ledger shows: it took nineteen commits to get from an
 empty directory to a copy-on-write filesystem — not nineteen hundred. The
 sequencing discipline is not overhead on the real work; it is why the real
 work compounded instead of collapsing. Where the road goes from here — the
-VFS, the AI service layer, Linux compatibility, real hardware — is the
-final chapter's subject.
+AI service layer, Linux compatibility, real hardware — is the final
+chapter's subject.
 
 <div style="page-break-after: always"></div>
 
@@ -3418,14 +3467,14 @@ how to keep growing.
 The roadmap (README) runs to phase 10, and each remaining phase is a chance to
 learn a major subsystem:
 
-- **Finish Phase 5 — the VFS.** The filesystem core exists; the next slices add a
-  virtual filesystem layer (a `struct file`, fd tables, `open`/`read`/`close`/
-  `fstat`/`lseek`/`getdents64`), a device filesystem, and *exec-from-disk* — at
-  which point the embedded program blob from Chapter 11 disappears and the kernel
-  loads `/bin/init` off graphfs. Then the write path and a fsck-after-boot
-  crash-consistency gate. Building a VFS teaches you the art of the *right
-  abstraction*: one interface over graphfs, devfs, and eventually a network
-  filesystem, without leaking any of their differences upward.
+- **Round out the filesystem.** Phase 5 is complete — VFS, devfs,
+  exec-from-disk, and the full write path with its fsck-after-boot gate — but
+  the deferred conveniences are exactly the right size for solo practice:
+  `chdir` and real relative paths, `dup`/`dup2` and `O_CLOEXEC`, `ftruncate`,
+  a `mount(2)` syscall over the compile-time table, POSIX unlink-while-open
+  semantics (on-disk orphan tracking — study how ext4's orphan list survives
+  a crash first). Each one touches an interface the earlier chapters pinned,
+  so you will feel exactly what the pinning bought.
 - **Phase 6 — AI as a system service.** A privileged userspace daemon bridged to
   a host-side helper over virtio-serial, exposed to every process via `/dev/ai`
   and dedicated syscalls. This is where the `TAG`/`REF` edges designed into
@@ -4388,10 +4437,12 @@ Details and the exact CPU/register contract are in [boot-protocol.md](boot-proto
 10. `pci_init()` / `virtio_blk_init()` / `block_selftest()` — bus scan, virtio-blk
     bring-up per VIRTIO 1.2, and a write/readback/restore round trip through the real
     device (see Appendix I).
-11. `vfs_init()` — mount the graphfs root read-only from the block device, initialize
+11. `vfs_init()` — mount the graphfs root writable from the block device, initialize
     devfs at `/dev` (see Appendix J). Panics if there is no disk or no valid filesystem.
 12. `selftest_run()` — in-kernel assertions over the lib, traps (int3), PMM, VMM
-    protections, heap, and scheduler (thread interleaving, sleep, preemption, join).
+    protections, heap, scheduler (thread interleaving, sleep, preemption, join), and
+    the filesystem write path (create/write/rename/unlink cycles onto the real disk,
+    free-space accounting asserted back to its starting counts).
 13. `process_run_init()` — `/bin/init` is read off the filesystem, validated, loaded
     into a fresh user address space, and runs in ring 3 as pid 1 with fds 0/1/2 open
     on `/dev/console`. Init exercises the whole process model and the VFS read side —
@@ -4775,9 +4826,9 @@ Implemented today (numbers from the Linux x86_64 table):
 
 | # | syscall | scope |
 |---|---|---|
-| 0 | `read(fd, buf, count)` | any open fd; console reads block until input, then short-read |
-| 1 | `write(fd, buf, count)` | any open fd; disk files are `-EBADF` until the 5d write path |
-| 2 | `open(path, flags)` | access mode + `O_DIRECTORY` only; disk opens for write are `-EROFS` |
+| 0 | `read(fd, buf, count)` | any readable fd; console reads block until input, then short-read |
+| 1 | `write(fd, buf, count)` | any writable fd; disk writes are durable before this returns |
+| 2 | `open(path, flags, mode)` | access mode + `O_CREAT`/`O_EXCL`/`O_TRUNC`/`O_APPEND`/`O_DIRECTORY`; other flags refused `-EINVAL` |
 | 3 | `close(fd)` | drops the fd table's reference; last reference frees the description |
 | 5 | `fstat(fd, statbuf)` | the Linux x86_64 144-byte `struct stat` (`_Static_assert`ed) |
 | 8 | `lseek(fd, off, whence)` | SET/CUR/END on files and directories; `-ESPIPE` on the console |
@@ -4786,12 +4837,20 @@ Implemented today (numbers from the Linux x86_64 table):
 | 59 | `execve(path, argv, envp)` | replace the image with the ELF at `path` on the filesystem; SysV argv/envp stack; fds survive |
 | 60 | `exit(status)` | zombie in the table, parent woken, every fd closed |
 | 61 | `wait4(pid, wstatus, 0, NULL)` | blocking reap of one child (pid > 0 exact, -1 any); Linux `WIFEXITED` status encoding |
+| 74 | `fsync(fd)` | 0 on graphfs objects (already durable); `-EINVAL` on the console |
+| 82 | `rename(old, new)` | atomic move/replace with POSIX semantics; `-EXDEV` across mounts |
+| 83 | `mkdir(path, mode)` | one atomic create+link transaction |
+| 84 | `rmdir(path)` | empty directories only; mount points are `-EBUSY` |
+| 86 | `link(old, new)` | hard links to regular files; directories are `-EPERM` |
+| 87 | `unlink(path)` | removes one name; last name of an *open* file is `-EBUSY` (v1 policy, Appendix J) |
 | 217 | `getdents64(fd, buf, count)` | real `linux_dirent64` records; directories synthesize `.` and `..` |
 
 The fd-backed syscalls dispatch through the VFS `struct file_ops` vtable; a
-`NULL` slot maps to the conventional errno (`write` on a read-only file
-`-EBADF`, `lseek` on the console `-ESPIPE`, `getdents64` on a regular file
-`-ENOTDIR`). The full open-file semantics live in Appendix J.
+`NULL` slot maps to the conventional errno (`write` on a directory `-EBADF`,
+`lseek` on the console `-ESPIPE`, `getdents64` on a regular file `-ENOTDIR`,
+`fsync` on the console `-EINVAL`), and the ops themselves enforce the
+description's access mode with `-EBADF`. The full open-file semantics live
+in Appendix J.
 
 Every user pointer is validated before use: the range must lie below
 `USER_VA_LIMIT` (`0x0000800000000000`, the canonical lower half) and every
@@ -4955,7 +5014,7 @@ stack. The linked ELFs are installed at `/bin` on the graphfs image
 through the VFS and joins it:
 
 ```
-user: launching init (/bin/init from disk, 13448 bytes)
+user: launching init (/bin/init from disk, 13488 bytes)
 hello from ring 3
 hello from execve
 user: console open via /dev/console ok
@@ -4964,9 +5023,9 @@ user: init exited (status 0)
 ```
 
 Init doubles as the acceptance test for the loader, the ABI, the process
-model, and the whole VFS read side. Its exit status names the first failed
-check; 0 means all forty-seven passed: `write` returns the full length,
-`.bss` zero-filled, `.data` initialized and writable, `getpid`,
+model, and the whole VFS. Its exit status names the first failed check; 0
+means all eighty-five passed: `write` returns the full length, `.bss`
+zero-filled, `.data` initialized and writable, `getpid`,
 `-ENOSYS`/`-EBADF`/`-EFAULT` error paths, all six argument registers
 surviving a syscall, the full process round trip — `fork` returns a fresh
 pid, the child `execve`s `/bin/hello` (which verifies its own argv arrived
@@ -4975,20 +5034,25 @@ second `wait4` returns `-ECHILD`, `execve` of an unknown path returns
 `-ENOENT` — fault isolation: a forked child that writes to a kernel address
 is killed with `SIGSEGV`, one that executes an illegal instruction with
 `SIGILL`, both observed through `wait4` while everything else keeps running —
-and the file surface: a known ELF opened and its magic read, `lseek` END/SET
+the read surface: a known ELF opened and its magic read, `lseek` END/SET
 proven against `fstat`'s size, `/bin` walked with `getdents64` and required
 to hold exactly `.`, `..`, `init`, `hello`, `/dev/../bin/./hello` resolving
 through the normalizer, and every error contract probed (`-ENOENT`,
-`-ENOTDIR`, `-EISDIR`, `-EROFS`, `-EBADF` after close, `-ESPIPE` on the
-console). After init is reaped, the kernel asserts the process table is
+`-ENOTDIR`, `-EISDIR`, `-EBADF` after close, `-ESPIPE` on the console) —
+and the write path, in a scratch tree init removes without a trace: a file
+created with `O_CREAT|O_EXCL`, written, reread byte-for-byte, `fstat`ed and
+`fsync`ed; `O_APPEND` landing at EOF; `O_TRUNC` emptying; a hard link
+sharing bytes and nlink; rename moving and the moved-into-own-subtree case
+refused `-EINVAL`; `mkdir`/`rmdir`/`unlink` with their whole errno
+vocabulary (`-EEXIST`, `-ENOTEMPTY`, `-EISDIR`, `-ENOTDIR`, the open-file
+`-EBUSY` policy, devfs `-EPERM`, mount-point `-EBUSY`, cross-mount
+`-EXDEV`). After init is reaped, the kernel asserts the process table is
 empty and that the physical frame count matches the pre-launch value: the
 whole fork/exec/wait cycle leaks nothing.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
 - Static `ET_EXEC` only; `ET_DYN`/interpreters are Phase 7 territory.
-- The root mount is read-only; `write` to disk files and the namespace
-  syscalls (`mkdir`, `unlink`, ...) arrive with slice 5d.
 - `FD_MAX` is 16, there is no `dup`/`dup2`, and no close-on-exec flags.
 - No `chdir`: every process's working directory is `/`, and relative paths
   resolve from there (defined, not undefined).
@@ -5092,7 +5156,8 @@ Filesystems see an array of `BLOCK_SIZE` (4 KiB) blocks:
 - `block_read`/`block_write` go through a 64-entry LRU cache
   (256 KiB of PMM frames). Writes are **write-through**: the cache never
   holds dirty data, so a crash can only lose what the filesystem had not
-  yet ordered. `fsync`-driven flushing arrives with the write path (5d).
+  yet ordered — and `fsync` has nothing to flush (it reports success on
+  already-durable data; see Appendix J).
 - Driver buffers must be physically contiguous; the cache's frame-backed
   entries satisfy this, and callers above the cache may pass any kernel
   memory.
@@ -5120,7 +5185,8 @@ features report the absence explicitly.
 
 - Single block device; no partitions (the fs disk is one filesystem).
 - Polled completion; no MSI-X, no async I/O, no request batching.
-- Write-through cache only; no dirty tracking until fsync lands (5d).
+- Write-through cache only; write-back with dirty tracking is a future
+  performance move that would make `fsync` meaningful.
 - The block layer is single-caller by contract until the VFS adds a
   sleeping lock (5c).
 
@@ -5128,31 +5194,39 @@ features report the absence explicitly.
 
 # The VFS: One Namespace, Open Files, and devfs
 
-Slice 5c gives processes files. This document is the contract for the virtual
-filesystem layer: mounts and path resolution, the open-file abstraction and
-per-process fd tables, the devfs device nodes, and the locking that lets every
-process reach the disk. Chapter 14 of the book is the reasoning behind these
-decisions; this is the reference. The layer below is graphfs (Appendix K) over
-the block layer (Appendix I); the layer above is the syscall surface
-(Appendix H).
+Slice 5c gives processes files; slice 5d lets them change the filesystem.
+This document is the contract for the virtual filesystem layer: mounts and
+path resolution, the open-file abstraction and per-process fd tables, the
+devfs device nodes, the write path and its policies, and the locking that
+lets every process reach the disk. Chapter 14 of the book is the reasoning
+behind these decisions; this is the reference. The layer below is graphfs
+(Appendix K) over the block layer (Appendix I); the layer above is the
+syscall surface (Appendix H).
 
 ## The objects
 
 Three objects, defined in `kernel/include/vfs.h`:
 
-- **`struct file_ops`** — a five-slot vtable: `read`, `write`, `lseek`,
-  `fstat`, `getdents`. Every open object is fully described by one ops table
-  plus a node id; nothing above the filesystems switches on file type. A
-  `NULL` slot means "does not apply," and the syscall layer maps it to a fixed
-  errno — the error vocabulary is part of the interface:
+- **`struct file_ops`** — a six-slot vtable: `read`, `write`, `lseek`,
+  `fstat`, `getdents`, `fsync`. Every open object is fully described by one
+  ops table plus a node id; nothing above the filesystems switches on file
+  type. A `NULL` slot means "this *object* does not support the operation,"
+  and the syscall layer maps it to a fixed errno — the error vocabulary is
+  part of the interface:
 
   | NULL slot | errno | rationale |
   |---|---|---|
   | `read` | `-EINVAL` | object is not readable |
-  | `write` | `-EBADF` | Linux's answer for a read-only description |
+  | `write` | `-EBADF` | directories never open for writing |
   | `lseek` | `-ESPIPE` | the console is a stream, like a pipe |
   | `getdents` | `-ENOTDIR` | only directories enumerate |
+  | `fsync` | `-EINVAL` | special file with nothing to sync (as Linux) |
   | `fstat` | — | mandatory; every ops table implements it |
+
+  Whether this *description* may read or write — the access mode given to
+  open — is enforced inside the ops themselves with `-EBADF`: a graphfs
+  file's `write` slot is always populated, and refuses an `O_RDONLY`
+  description at call time.
 
 - **`struct file`** — an *open file description* (the POSIX term): ops
   pointer, node id (graphfs node or devfs minor), byte **offset**, the `O_*`
@@ -5197,18 +5271,26 @@ walk; the comment at the top of `vfs_path.c` pins this dependency.
 
 ## open, and what each object supports
 
-`vfs_open()` accepts the access mode plus `O_DIRECTORY`; any other flag
-(`O_CREAT`, ...) is `-EINVAL` until the write path. The root mount is
-read-only in 5c: opening a disk file `O_WRONLY`/`O_RDWR` is `-EROFS`, opening
-any directory for write is `-EISDIR`, and `O_DIRECTORY` on a file is
-`-ENOTDIR`.
+`vfs_open()` accepts the access mode plus `O_CREAT`, `O_EXCL`, `O_TRUNC`,
+`O_APPEND`, and `O_DIRECTORY`; any other flag is `-EINVAL` — unimplemented
+flags are refused, never silently ignored. The Linux corner cases are kept:
+`O_DIRECTORY | O_CREAT` is `-EINVAL`, `O_CREAT` or `O_TRUNC` on an existing
+directory is `-EISDIR`, `O_TRUNC` truncates even on an `O_RDONLY` open, and
+`O_DIRECTORY` on a file is `-ENOTDIR`.
 
-| object | read | write | lseek | getdents | fstat mode |
-|---|---|---|---|---|---|
-| graphfs file | yes | — (`-EBADF`) | SET/CUR/END | — (`-ENOTDIR`) | `S_IFREG` |
-| graphfs directory | `-EISDIR` | — | SET/CUR/END | yes | `S_IFDIR` |
-| `/dev` directory | `-EISDIR` | — | SET/CUR | yes | `S_IFDIR \| 0755` |
-| `/dev/console` | blocking | console | — (`-ESPIPE`) | — | `S_IFCHR \| 0666`, rdev 5:1 |
+`O_CREAT` creates a missing regular file (mode `& 07777`; there is no umask)
+in one atomic graphfs transaction — resolve, create, and link happen under a
+single lock hold, so two racing creators cannot both succeed with `O_EXCL`.
+`O_APPEND` makes every write land at the current EOF: the size read and the
+write share one lock hold, so appends are atomic. Files created or truncated
+this way behave identically to mkfs-installed ones.
+
+| object | read | write | lseek | getdents | fsync | fstat mode |
+|---|---|---|---|---|---|---|
+| graphfs file | mode-checked | mode-checked | SET/CUR/END | — (`-ENOTDIR`) | 0 | `S_IFREG` |
+| graphfs directory | `-EISDIR` | — (`-EBADF`) | SET/CUR/END | yes | 0 | `S_IFDIR` |
+| `/dev` directory | `-EISDIR` | — | SET/CUR | yes | — (`-EINVAL`) | `S_IFDIR \| 0755` |
+| `/dev/console` | blocking | console | — (`-ESPIPE`) | — | — (`-EINVAL`) | `S_IFCHR \| 0666`, rdev 5:1 |
 
 Offsets may seek past EOF (reads there return 0); a negative resulting offset
 is `-EINVAL`. `fstat` fills the Linux x86_64 144-byte `struct stat`
@@ -5227,8 +5309,60 @@ sees.
 Error mapping from the graphfs core is centralized (`gfs_errno`): `GFS_ENOENT
 → -ENOENT`, `GFS_ENOTDIR → -ENOTDIR`, `GFS_EISDIR → -EISDIR`,
 `GFS_ENAMETOOLONG → -ENAMETOOLONG`, `GFS_EROFS → -EROFS`, `GFS_EINVAL →
--EINVAL`, and everything else — device failure, `GFS_EBADCRC`, detected
-corruption — is `-EIO`: the data cannot be served, whatever the cause.
+-EINVAL`, `GFS_EEXIST → -EEXIST`, `GFS_ENOTEMPTY → -ENOTEMPTY`, `GFS_EFBIG →
+-EFBIG`, `GFS_ENOSPC` *and* `GFS_EFRAG` `→ -ENOSPC` (however the space ran
+out, the write does not fit), `GFS_EMANYPARENTS → -EPERM` (Linux's answer to
+`link(2)` on a directory), and everything else — device failure,
+`GFS_EBADCRC`, detected corruption — is `-EIO`: the data cannot be served,
+whatever the cause.
+
+## The write path
+
+The root is mounted writable; every mutating call is one graphfs CoW
+transaction that is durable before the syscall returns (Appendix K). The
+namespace syscalls map onto the VFS entry points:
+
+- **`mkdir`** — `gfs_create_at(parent, name, NAMESPACE)`: creation and
+  linking are a single transaction, because fsck rightly treats an orphaned
+  directory as corruption; there is no crash window in which a node exists
+  without its name. `O_CREAT` uses the same call with a DATA node.
+- **`rmdir`** — refuses a non-directory (`-ENOTDIR`), a non-empty directory
+  (`-ENOTEMPTY`, enforced by the core), the root and mount points
+  (`-EBUSY`), and a directory some fd holds open (`-EBUSY`).
+- **`unlink`** — refuses directories (`-EISDIR`; `rmdir` is the tool). A
+  DATA node whose last name is removed is freed with its blocks — unless it
+  is nlink > 1 (a hard link keeps it alive under its other names).
+- **`link`** — hard links, DATA nodes only (`-EPERM` for directories, as
+  Linux — the single-parent namespace invariant is load-bearing: it is what
+  makes `..` one field and cycles impossible). Cross-mount is `-EXDEV`.
+- **`rename`** — atomic in one transaction, with POSIX replace semantics: a
+  file replaces a file, a directory replaces an *empty* directory, the
+  replaced node is freed if that was its last name. Renaming onto a hard
+  link of the same node is a no-op. Moving a directory into its own subtree
+  is `-EINVAL`, detected by walking the destination's single-parent chain.
+  A moved directory's parent pointer is rewritten in the same transaction.
+- **`fsync`** — returns 0 on any graphfs object: the block cache is
+  write-through and every transaction commits before returning, so there is
+  nothing buffered anywhere to flush. The call exists so programs can *ask*
+  for durability and get an honest answer.
+
+**The open-unlink policy (v1, pinned deliberately).** Removing the *last*
+name of a file that some open description still references is `-EBUSY`.
+POSIX instead keeps the file alive until the last close; that requires
+on-disk orphan tracking to survive a crash between the unlink and the close
+(or it leaks nodes), which is real machinery for a semantics nothing in this
+system needs yet. The VFS keeps an open-description count per node
+(`node_opens[]`, maintained under the filesystem lock from open to last
+close) and refuses exactly the dangerous case: `nlink == 1 && opens > 0`.
+Unlinking one name of a multiply-linked open file works, so the temp-file
+shapes that matter are expressible with a hard link. Replacing an open file
+via `rename` answers the same `-EBUSY`. Revisited when the Linux personality
+layer (Phase 7) needs the real semantics.
+
+Namespace mutation respects the mount table: `/` and `/dev` (a mount point)
+refuse removal and renaming with `-EBUSY` (`mkdir` on them is `-EEXIST`),
+anything *under* `/dev` is `-EPERM` — devfs is structurally immutable — and
+`rename`/`link` across the graphfs/devfs seam is `-EXDEV`.
 
 ## devfs
 
@@ -5237,7 +5371,10 @@ dirents: `.`, `..`, `console`) and `/dev/console`, the kernel console (serial
 + VGA) for output and the PS/2 keyboard for input. Node ids are devfs-local
 (1 = directory, 2 = console) under `st_dev` 2, so they never collide with
 graphfs inos. A path *through* a device (`/dev/console/x`) is `-ENOTDIR`, not
-`-ENOENT`.
+`-ENOENT`. devfs cannot grow nodes: `O_CREAT` on a missing name directly
+under `/dev` is `-EPERM` (a missing *intermediate* directory stays plain
+`-ENOENT`); `O_EXCL` against an existing device is `-EEXIST`; `O_TRUNC` on
+the console is ignored, as Linux ignores it on character devices.
 
 Console reads are terminal-style: **block until at least one character is
 buffered, then return what is there** (a short read). The lost-wakeup race —
@@ -5281,28 +5418,37 @@ table and the embedded `kernel/user_blob.asm` blob are deleted. The boot
 marker proves it:
 
 ```
-vfs: graphfs root mounted ro (gen 11, 4081/4096 blocks free, 1018/1024 nodes free)
+vfs: graphfs root mounted rw (gen 7, 4081/4096 blocks free, 1018/1024 nodes free)
 vfs: devfs at /dev (console)
-user: launching init (/bin/init from disk, 13448 bytes)
+user: launching init (/bin/init from disk, 13488 bytes)
 ```
 
 ## Verification
 
 - `vfs_path_norm` is host-tested exhaustively (canonical forms, `..` at every
   position, both `-ENAMETOOLONG` causes, `-EINVAL`).
-- Init's acceptance suite (Appendix H) exercises the whole read surface from
-  ring 3 — every syscall, every error contract, `getdents64` against the known
-  image manifest, `/dev/../bin/./hello` through the normalizer — and the boot
-  integration test asserts the markers and `status 0`.
-- `graphfs_fsck` runs against `fs.img` in `make check`, so the image the
-  kernel mounts is independently verified.
+- The graphfs write path — `gfs_create_at`, `gfs_rename` (every replace and
+  cycle case), `gfs_truncate` (including the zero-tail invariant), and full
+  create/write/rename/unlink accounting round trips — is host-tested under
+  ASan/UBSan with fsck after every mutation (`tests/host/test_graphfs.c`).
+- The in-kernel fs selftest runs the same cycles at every boot through the
+  real VFS onto the real disk, asserting that free blocks and nodes return
+  exactly to their starting counts (`selftest: fs write path ok`).
+- Init's acceptance suite (Appendix H) exercises the whole surface from
+  ring 3 — every syscall, every error contract, `getdents64` against the
+  known image manifest, the write path in a scratch tree it removes without
+  a trace — and the boot integration test asserts the markers and `status 0`.
+- `graphfs_fsck` gates the freshly built `fs.img` in `make check`, **and
+  runs again on the image the guest wrote to after every boot test** — every
+  boot is a crash-consistency test of the write path.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
-- The root mount is read-only; `write`, `mkdir`, `link`, `unlink`, `rename`,
-  `fsync` and remount-writable are slice 5d.
+- Unlinking the last name of an open file is `-EBUSY`, not deferred
+  reclamation (the pinned v1 policy above; revisited in Phase 7).
 - Mounts are compile-time; a `mount(2)` syscall is far future.
-- No `chdir`/cwd, no `dup`/`dup2`, no `O_CLOEXEC`, `FD_MAX` = 16.
+- No `chdir`/cwd, no `dup`/`dup2`, no `O_CLOEXEC`, no `ftruncate`/
+  `fdatasync`, `FD_MAX` = 16. No timestamps until the kernel keeps a clock.
 - One global filesystem lock; revisit when I/O stops being polled (or SMP).
 - Lexical `..` normalization is valid only while the namespace is a strict
   tree with no symlinks (graphfs v1 policy).
@@ -5474,11 +5620,40 @@ buffer (`gfs_mount_work_size` = `2 * ceil(total_blocks/8)` bytes):
 Allocation draws only from blocks free in **both** bitmaps, so a block freed
 this transaction — still reachable through the one-generation fallback
 superblock — is never reused until the transaction commits. Each mutating
-call (`gfs_node_create`, `gfs_link`, `gfs_unlink`, `gfs_write`) is its own
-transaction: it CoWs the metadata it touches up to the node map, writes the
-inactive bitmap copy and inactive superblock slot at `generation + 1`, and
-returns only once that superblock write lands. There is no partial write on
-`GFS_ENOSPC`.
+call (`gfs_node_create`, `gfs_link`, `gfs_unlink`, `gfs_write`,
+`gfs_create_at`, `gfs_rename`, `gfs_truncate`) is its own transaction: it
+CoWs the metadata it touches up to the node map, writes the inactive bitmap
+copy and inactive superblock slot at `generation + 1`, and returns only once
+that superblock write lands. There is no partial write on `GFS_ENOSPC`.
+
+Three write calls arrived with slice 5d, shaped by the transaction model:
+
+- **`gfs_create_at(dir, name, type, mode)`** — create a node *and* link it
+  in one transaction. The two-call sequence (`gfs_node_create` +
+  `gfs_link`) has a crash window that leaves an orphan, and an orphaned
+  `NAMESPACE` node is exactly what fsck reports as corruption — so
+  namespace-visible creation (`mkdir`, `O_CREAT`) must be atomic. The node
+  is born with `nlink 1` and its parent set; no committed generation ever
+  holds an orphan.
+- **`gfs_rename(olddir, oldname, newdir, newname)`** — the POSIX move, one
+  transaction: source edge removed, existing destination replaced (a file
+  replaces a file, a directory replaces an *empty* directory; a replaced
+  node at `nlink 0` is freed with its blocks), new edge added, and a moved
+  directory's parent field rewritten. Moving a directory under its own
+  subtree is refused by walking the destination's single-parent chain to
+  the root — cheap precisely because namespaces are single-parent. Two
+  names for the same node rename to a no-op.
+- **`gfs_truncate(id, size)`** — shrink frees whole blocks past the new end
+  and CoW-rewrites the kept partial last block with its tail zeroed;
+  growth just moves the size (the new range reads as a hole).
+
+**Format invariant: bytes past EOF inside a file's last block are zero.**
+`gfs_write` establishes it (fresh partial blocks are zero-filled before the
+payload lands) and `gfs_truncate` maintains it (the shrink zeroes the kept
+tail), so extending a file — by write or by truncate — can never expose
+stale bytes from a previous life of the block. fsck verifies it for every
+file, along with its companion: no extent maps blocks at or past
+`ceil(size / 4096)`.
 
 ## Tools and testing
 
@@ -5492,16 +5667,22 @@ the kernel mounts — the format has a single implementation:
 - [`tools/graphfs_fsck.c`](../tools/graphfs_fsck.c) — `graphfs_fsck img`
   runs `gfs_fsck` over the image. Since a healthy CoW+checksummed image
   always passes, a failure means a core bug or media corruption. `make
-  check-fsck` gates the freshly built image; the 5d crash-consistency gate
-  will run the same check after boot.
+  check-fsck` gates the freshly built image, and `tests/run_qemu.py` runs
+  the same check on the image the guest *wrote to* after every boot test —
+  the write path is crash-consistency-verified on every `make check`.
 
 Three test levels cover the format:
 
 - **Host unit tests** — [`tests/host/test_graphfs.c`](../tests/host/test_graphfs.c),
-  built into `make check-host` under ASan/UBSan against an in-memory device.
-- **fsck gate** — `make check-fsck`, above.
-- **Boot integration** — the kernel mounts `build/fs.img` over virtio-blk
-  during `make check-boot` (read path in 5c).
+  built into `make check-host` under ASan/UBSan against an in-memory device:
+  format/mount/fallback properties, every write call's success and rejection
+  paths, rename's replace and cycle cases, truncate's zero-tail invariant,
+  and create/write/rename/unlink accounting round trips with fsck after
+  every mutation.
+- **fsck gates** — `make check-fsck` and the post-boot fsck, above.
+- **Boot integration** — the kernel mounts `build/fs.img` writable over
+  virtio-blk during `make check-boot`; the in-kernel selftest stress-cycles
+  the write path and init exercises it from ring 3.
 
 ## v1 limits (carried, by design)
 
@@ -5549,9 +5730,13 @@ allocator, a path resolver, an ELF parser) must arrive with host unit tests.
 `kernel/selftest.c` runs a boot-time assertion suite over the freestanding library as
 compiled by the *real* kernel toolchain (`--target=x86_64-elf`, `-mcmodel=kernel`,
 no SSE). This catches codegen- and environment-specific breakage the host build cannot.
-On success it prints:
+It also stress-tests the filesystem write path against the real disk: repeated
+create/write/read/rename/unlink cycles through the VFS, asserting after each cycle
+that free blocks and nodes return exactly to their starting counts (the same leak
+discipline the PMM and heap tests use). On success it prints:
 
 ```
+selftest: fs write path ok (create/write/rename/unlink cycles)
 selftest: passed (N assertions)
 ```
 
@@ -5578,6 +5763,12 @@ and fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on 
 timeout. On failure the full serial transcript is printed. The bootloader and kernel are
 written so that every fatal path emits one of the failure patterns — a hang without
 output is the only failure mode the harness can attribute solely to a timeout.
+
+The guest boots a throwaway *copy* of `fs.img` and writes to it all boot long — the
+block selftest, the in-kernel fs stress cycles, init's write-path checks. After the
+markers pass, the harness runs `graphfs_fsck` over that written image and fails the
+test unless it is perfectly consistent: **every boot test is also an end-to-end
+crash-consistency test of the write path** (`--fsck`, wired in by `make check-boot`).
 
 As the OS grows, new integration scenarios add markers (and eventually scripted input via
 the QEMU monitor); existing markers are never removed, only extended.

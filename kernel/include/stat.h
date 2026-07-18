@@ -16,12 +16,16 @@
 #define S_IFDIR 0040000u
 #define S_IFCHR 0020000u
 
-/* open(2) flags. The kernel implements O_RDONLY today (the mount is
- * read-only until slice 5d); everything else is rejected. */
+/* open(2) flags. Everything the kernel implements; other bits are
+ * rejected with -EINVAL rather than ignored. */
 #define O_RDONLY    00000000
 #define O_WRONLY    00000001
 #define O_RDWR      00000002
 #define O_ACCMODE   00000003
+#define O_CREAT     00000100 /* create a missing regular file */
+#define O_EXCL      00000200 /* with O_CREAT: fail if the path exists */
+#define O_TRUNC     00001000 /* truncate an existing regular file to 0 */
+#define O_APPEND    00002000 /* every write lands at EOF */
 #define O_DIRECTORY 00200000 /* fail unless the path is a directory */
 
 /* lseek(2) whence. */
