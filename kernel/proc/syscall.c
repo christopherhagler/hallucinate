@@ -179,6 +179,34 @@ static uint64_t sys_rename(uint64_t uold, uint64_t unew) {
     return (uint64_t)vfs_rename(oldp, newp);
 }
 
+static uint64_t sys_pipe(uint64_t ufds) {
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+    long rc = pipe_open(&rf, &wf);
+    if (rc != 0) {
+        return (uint64_t)rc;
+    }
+    long rfd = process_fd_install(rf);
+    if (rfd < 0) {
+        vfs_file_put(rf);
+        vfs_file_put(wf);
+        return (uint64_t)rfd;
+    }
+    long wfd = process_fd_install(wf);
+    if (wfd < 0) {
+        process_fd_close((int)rfd);
+        vfs_file_put(wf);
+        return (uint64_t)wfd;
+    }
+    int32_t fds[2] = {(int32_t)rfd, (int32_t)wfd};
+    if (!user_range_ok(ufds, sizeof(fds), 1) || user_copy_to(ufds, fds, sizeof(fds)) != 0) {
+        process_fd_close((int)rfd);
+        process_fd_close((int)wfd);
+        return ERR(EFAULT);
+    }
+    return 0;
+}
+
 static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count) {
     struct file *f = process_file_get((int)fd);
     if (f == NULL) {
@@ -212,6 +240,9 @@ void syscall_dispatch(struct syscall_frame *frame) {
         return;
     case SYS_lseek:
         frame->rax = sys_lseek(frame->rdi, frame->rsi, frame->rdx);
+        return;
+    case SYS_pipe:
+        frame->rax = sys_pipe(frame->rdi);
         return;
     case SYS_getpid:
         frame->rax = (uint64_t)process_getpid();

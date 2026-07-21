@@ -61,13 +61,22 @@ struct file_ops {
     long (*fstat)(struct file *f, struct stat *st);
     long (*getdents)(struct file *f, void *buf, size_t len);
     long (*fsync)(struct file *f);
+    /* Optional: called once, right before the description is freed
+     * (the last reference just dropped). Objects with shared state
+     * outside the description itself use this to tear it down — a
+     * pipe end decrements its shared buffer's reader/writer count
+     * and wakes the other side here. NULL for objects with nothing
+     * to do (graphfs and devfs manage their own state elsewhere). */
+    void (*release)(struct file *f);
 };
 
 /*
  * An open file description (POSIX term): allocated by open, shared —
  * offset included — by every fd that fork duplicated, freed when the
  * last reference closes. `node` identifies the object inside its
- * filesystem (graphfs node id; devfs minor).
+ * filesystem (graphfs node id; devfs minor); `priv` is free for a
+ * file_ops implementation to use for anything `node` doesn't fit —
+ * a pipe stores the pointer to its shared ring buffer there.
  */
 struct file {
     const struct file_ops *ops;
@@ -75,6 +84,7 @@ struct file {
     uint64_t off;
     int flags; /* O_* as given to open */
     int refs;  /* fd-table references, vfs.c-owned */
+    void *priv;
 };
 
 /*
@@ -151,3 +161,11 @@ long vfs_path_norm(const char *in, char *out, size_t cap);
  * canonical path below the /dev mount ("" = the directory itself). */
 void devfs_init(void);
 long devfs_open(const char *rel, int flags, struct file **out);
+
+/*
+ * Anonymous pipe (kernel/fs/pipe.c): allocates one shared ring buffer
+ * and two open file descriptions over it, unattached to any mount —
+ * there is no path a pipe can be opened by. On success *read_out and
+ * *write_out each hold one reference; the only failure is -ENOMEM.
+ */
+long pipe_open(struct file **read_out, struct file **write_out);

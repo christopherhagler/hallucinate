@@ -136,6 +136,9 @@ void vfs_file_put(struct file *f) {
             node_opens[f->node]--;
             mutex_unlock(&fs_lock);
         }
+        if (f->ops->release != NULL) {
+            f->ops->release(f);
+        }
         kfree(f);
     }
 }

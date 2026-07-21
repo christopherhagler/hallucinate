@@ -16,6 +16,7 @@
 #define SYS_close      3
 #define SYS_fstat      5
 #define SYS_lseek      8
+#define SYS_pipe       22
 #define SYS_getpid     39
 #define SYS_fork       57
 #define SYS_execve     59
@@ -43,6 +44,7 @@
 #define EINVAL    22
 #define ESPIPE    29
 #define EROFS     30
+#define EPIPE     32
 #define ENOSYS    38
 #define ENOTEMPTY 39
 
@@ -66,6 +68,7 @@
 #define S_IFREG 0100000u
 #define S_IFDIR 0040000u
 #define S_IFCHR 0020000u
+#define S_IFIFO 0010000u
 
 /* getdents64 d_type values. */
 #define DT_CHR 2u
@@ -149,6 +152,11 @@ static inline long sys_open3(const char *path, long flags, long mode) {
 
 static inline long sys_fsync(int fd) {
     return syscall1(SYS_fsync, fd);
+}
+
+/* fds[0] = read end, fds[1] = write end, as Linux pipe(2). */
+static inline long sys_pipe(int fds[2]) {
+    return syscall1(SYS_pipe, (long)(uintptr_t)fds);
 }
 
 static inline long sys_mkdir(const char *path, long mode) {

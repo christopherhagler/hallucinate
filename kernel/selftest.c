@@ -298,6 +298,81 @@ static void test_sched(void) {
     CHECK(kmalloc_live_objects() == objects_before);
 }
 
+/* --- pipes --- */
+
+struct pipe_write_ctx {
+    struct file *f;
+    const uint8_t *data;
+    size_t len;
+    long result;
+};
+
+static void pipe_write_worker(void *arg) {
+    struct pipe_write_ctx *ctx = arg;
+    ctx->result = ctx->f->ops->write(ctx->f, ctx->data, ctx->len);
+    vfs_file_put(ctx->f);
+}
+
+/*
+ * Proves the part pipe_core.c's host tests cannot: a real writer
+ * thread and a real reader thread, several times the buffer's
+ * capacity apart, must round-trip every byte through actual
+ * sched_block()/sched_wake() handoffs — not just the ring math.
+ */
+static void test_pipe(void) {
+    uint64_t threads_before = sched_thread_count();
+    uint64_t objects_before = kmalloc_live_objects();
+
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+    CHECK(pipe_open(&rf, &wf) == 0);
+
+    /* Several times the pipe's internal buffer, so the writer is
+     * forced to block on a full buffer at least once and rely on the
+     * reader's wakeup, not just fit in one write() call. */
+    enum { DATA_LEN = (4096 * 3) + 123 };
+    static uint8_t src[DATA_LEN];
+    static uint8_t dst[DATA_LEN];
+    uint32_t seed = 0xC0FFEEu;
+    for (size_t i = 0; i < DATA_LEN; i++) {
+        seed = (seed * 1103515245u) + 12345u;
+        src[i] = (uint8_t)(seed >> 24);
+    }
+
+    struct pipe_write_ctx ctx = {.f = wf, .data = src, .len = DATA_LEN, .result = -1};
+    struct thread *writer = thread_create("pipe-writer", pipe_write_worker, &ctx);
+
+    size_t got = 0;
+    while (got < DATA_LEN) {
+        long n = rf->ops->read(rf, dst + got, DATA_LEN - got);
+        CHECK(n > 0); /* the writer is still alive; EOF here is a bug */
+        got += (size_t)n;
+    }
+    /* The writer has (or is about to have) closed its end: this read
+     * must resolve to EOF, not block forever. */
+    CHECK(rf->ops->read(rf, dst, sizeof(dst)) == 0);
+
+    thread_join(writer);
+    CHECK(ctx.result == DATA_LEN);
+    CHECK(memcmp(src, dst, DATA_LEN) == 0);
+    vfs_file_put(rf);
+
+    CHECK(sched_thread_count() == threads_before);
+    CHECK(kmalloc_live_objects() == objects_before);
+
+    /* -EPIPE: writing with no readers left, no blocking involved. */
+    struct file *rf2 = NULL;
+    struct file *wf2 = NULL;
+    CHECK(pipe_open(&rf2, &wf2) == 0);
+    vfs_file_put(rf2);
+    uint8_t one = 'x';
+    CHECK(wf2->ops->write(wf2, &one, 1) == -EPIPE);
+    vfs_file_put(wf2);
+
+    CHECK(kmalloc_live_objects() == objects_before);
+    kprintf("selftest: pipes ok (blocking write/read, EOF, EPIPE)\n");
+}
+
 /* --- the filesystem write path --- */
 
 /*
@@ -397,6 +472,7 @@ void selftest_run(void) {
     test_vmm();
     test_heap();
     test_sched();
+    test_pipe();
     if (vfs_has_root()) {
         test_fs();
     } else {

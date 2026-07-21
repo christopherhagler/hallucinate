@@ -182,11 +182,12 @@ HOST_TEST_SRCS := tests/host/test_main.c tests/host/test_string.c \
     tests/host/test_fmt.c tests/host/test_kbd.c tests/host/test_pmm.c \
     tests/host/test_heap.c tests/host/test_sched.c tests/host/test_elf64.c \
     tests/host/test_proc.c tests/host/test_virtq.c tests/host/test_graphfs.c \
-    tests/host/test_vfs_path.c \
+    tests/host/test_vfs_path.c tests/host/test_pipe_core.c \
     kernel/lib/string.c kernel/lib/fmt.c kernel/drivers/kbd_map.c \
     kernel/mm/pmm_core.c kernel/mm/heap_core.c kernel/sched/sched_core.c \
     kernel/lib/elf64.c kernel/proc/proc_core.c kernel/drivers/virtq_core.c \
-    kernel/lib/crc32c.c kernel/fs/graphfs_core.c kernel/fs/vfs_path.c
+    kernel/lib/crc32c.c kernel/fs/graphfs_core.c kernel/fs/vfs_path.c \
+    kernel/fs/pipe_core.c
 
 $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
                      kernel/include/string.h kernel/include/fmt.h \
@@ -195,7 +196,8 @@ $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
                      kernel/include/thread.h kernel/include/elf64.h \
                      kernel/include/proc_core.h kernel/include/virtq_core.h \
                      kernel/include/crc32c.h kernel/include/graphfs_core.h \
-                     kernel/include/vfs.h kernel/include/stat.h
+                     kernel/include/vfs.h kernel/include/stat.h \
+                     kernel/include/pipe_core.h
 	@mkdir -p $(BUILD)
 	$(CC) $(HOST_CFLAGS) $(HOST_TEST_SRCS) -o $@
 

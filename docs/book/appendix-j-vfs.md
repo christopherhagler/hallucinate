@@ -13,12 +13,14 @@ syscall surface (Appendix H).
 
 Three objects, defined in `kernel/include/vfs.h`:
 
-- **`struct file_ops`** — a six-slot vtable: `read`, `write`, `lseek`,
-  `fstat`, `getdents`, `fsync`. Every open object is fully described by one
+- **`struct file_ops`** — six operation slots plus one lifecycle hook:
+  `read`, `write`, `lseek`, `fstat`, `getdents`, `fsync`, and `release`
+  (optional, called once right before the description is freed — pipes are
+  the first user, see below). Every open object is fully described by one
   ops table plus a node id; nothing above the filesystems switches on file
-  type. A `NULL` slot means "this *object* does not support the operation,"
-  and the syscall layer maps it to a fixed errno — the error vocabulary is
-  part of the interface:
+  type. A `NULL` operation slot means "this *object* does not support the
+  operation," and the syscall layer maps it to a fixed errno — the error
+  vocabulary is part of the interface:
 
   | NULL slot | errno | rationale |
   |---|---|---|
@@ -36,8 +38,10 @@ Three objects, defined in `kernel/include/vfs.h`:
 
 - **`struct file`** — an *open file description* (the POSIX term): ops
   pointer, node id (graphfs node or devfs minor), byte **offset**, the `O_*`
-  flags from open, and a reference count. The description — offset included —
-  is shared by every fd that `fork` duplicated; it is freed when the last
+  flags from open, a reference count, and `priv` — a `void *` free for a
+  file_ops implementation to use for anything `node` doesn't fit (a pipe's
+  shared ring buffer, see below). The description — offset included — is
+  shared by every fd that `fork` duplicated; it is freed when the last
   reference closes. Refcount updates run under `cpu_irq_save` (single CPU).
 
 - **The mount table** — compile-time in v1: the graphfs on the registered
@@ -190,6 +194,55 @@ interrupts-off section, and the keyboard IRQ handler wakes the published
 reader through a one-line notify hook (`keyboard_set_notify`). A `read_lock`
 mutex serializes concurrent readers so the single waiter slot suffices.
 
+## Pipes
+
+`kernel/fs/pipe.c` (Phase 6) is the first VFS object with no path and no
+mount: `pipe(2)` (syscall 22, Appendix H) allocates one shared 4 KiB ring
+buffer and two open file descriptions over it — a read end and a write end —
+directly, without going through `vfs_open`'s mount table at all. It exists
+to give the file_ops vtable its first user *beyond* graphfs and devfs, and
+the shape of what that took is the reusable part:
+
+- **`pipe_core.c`** is the ring buffer's index arithmetic (wraparound,
+  short reads/writes when the buffer under- or over-runs the request),
+  pure and host-tested exactly like `graphfs_core`/`virtq_core` — no
+  allocation, no blocking, no kernel dependency at all.
+- **`struct file` grew a `priv` field** (`void *`, alongside the existing
+  `node`) because a pipe's two ends need to reach the *same* shared ring
+  buffer, and that buffer isn't identified by a filesystem-scoped id the
+  way `node` is for graphfs and devfs — it needs a raw pointer.
+- **`struct file_ops` grew an optional `release` hook**, called once from
+  `vfs_file_put` right before the description is freed. graphfs and devfs
+  still don't use it (their per-node bookkeeping lives inline in
+  `vfs_file_put`); a pipe end uses it to decrement its shared buffer's
+  reader or writer count and wake the other side, which is what turns
+  "the last copy of the other end closed" into `EOF` (read) or `-EPIPE`
+  (write) instead of a leaked `struct pipe` or a wakeup nobody delivers.
+
+**Locking is deliberately not the VFS's sleeping `fs_lock`.** A pipe
+operation is a memory copy, not disk I/O — there is nothing slow to hold a
+lock across — so it follows the PMM/heap pattern instead: a plain
+interrupts-off critical section around the ring-buffer manipulation and the
+wait-queue push. `sched_block()` is called from inside that section, which
+is exactly what closes the lost-wakeup race (publish the wait, then block,
+without interrupts re-enabling in between) — the same contract devfs's
+console read and `wait4` rely on, reused a third and fourth time (two wait
+queues: readers block on empty, writers block on full). The wait queues
+reuse `thread->next`, exactly as `struct mutex`'s FIFO queue does — a thread
+blocked on a pipe is provably on no other queue at the same time.
+
+**Semantics**, matching Linux where there is a clean answer: `read` returns
+as soon as *any* data is available (a short read, never waits to fill the
+whole request) and returns `0` once the buffer is empty and every writer has
+closed (`EOF`, not a blocked-forever read); `write` loops internally and
+blocks on a full buffer until every requested byte is queued, and returns
+`-EPIPE` immediately if every reader has already closed. What isn't
+promised: write atomicity for writes larger than one buffer when multiple
+writers share a pipe (Linux guarantees this up to `PIPE_BUF`) — nothing in
+this kernel puts more than one writer on the same pipe yet, so there is no
+observer to violate the guarantee for; and `O_NONBLOCK` / `dup`-based
+pipeline wiring (Appendix H's known limits).
+
 ## Locking
 
 The kernel's first sleeping lock (`kernel/sched/mutex.c`, `struct mutex`)
@@ -226,7 +279,7 @@ marker proves it:
 ```
 vfs: graphfs root mounted rw (gen 7, 4081/4096 blocks free, 1018/1024 nodes free)
 vfs: devfs at /dev (console)
-user: launching init (/bin/init from disk, 13488 bytes)
+user: launching init (/bin/init from disk, 17688 bytes)
 ```
 
 ## Booting without a root filesystem

@@ -2883,7 +2883,7 @@ image into a kernel buffer, load, free — and the built-in program table,
 marker changes from `launching init (embedded ELF)` to:
 
 ```
-user: launching init (/bin/init from disk, 13488 bytes)
+user: launching init (/bin/init from disk, 17688 bytes)
 ```
 
 and the integration test asserts the new text — the boot now *proves* init came
@@ -4876,6 +4876,7 @@ Implemented today (numbers from the Linux x86_64 table):
 | 3 | `close(fd)` | drops the fd table's reference; last reference frees the description |
 | 5 | `fstat(fd, statbuf)` | the Linux x86_64 144-byte `struct stat` (`_Static_assert`ed) |
 | 8 | `lseek(fd, off, whence)` | SET/CUR/END on files and directories; `-ESPIPE` on the console |
+| 22 | `pipe(fds[2])` | anonymous pipe: `fds[0]` read end, `fds[1]` write end (Appendix J) |
 | 39 | `getpid()` | the calling process's pid |
 | 57 | `fork()` | full process clone (eager copy; COW later); child gets rax = 0 |
 | 59 | `execve(path, argv, envp)` | replace the image with the ELF at `path` on the filesystem; SysV argv/envp stack; fds survive |
@@ -5058,7 +5059,7 @@ stack. The linked ELFs are installed at `/bin` on the graphfs image
 through the VFS and joins it:
 
 ```
-user: launching init (/bin/init from disk, 13488 bytes)
+user: launching init (/bin/init from disk, 17688 bytes)
 hello from ring 3
 hello from execve
 user: console open via /dev/console ok
@@ -5074,7 +5075,7 @@ hardware before an AHCI/NVMe driver exists (Appendix M).
 
 Init doubles as the acceptance test for the loader, the ABI, the process
 model, and the whole VFS. Its exit status names the first failed check; 0
-means all eighty-five passed: `write` returns the full length, `.bss`
+means all one hundred four passed: `write` returns the full length, `.bss`
 zero-filled, `.data` initialized and writable, `getpid`,
 `-ENOSYS`/`-EBADF`/`-EFAULT` error paths, all six argument registers
 surviving a syscall, the full process round trip — `fork` returns a fresh
@@ -5096,9 +5097,13 @@ sharing bytes and nlink; rename moving and the moved-into-own-subtree case
 refused `-EINVAL`; `mkdir`/`rmdir`/`unlink` with their whole errno
 vocabulary (`-EEXIST`, `-ENOTEMPTY`, `-EISDIR`, `-ENOTDIR`, the open-file
 `-EBUSY` policy, devfs `-EPERM`, mount-point `-EBUSY`, cross-mount
-`-EXDEV`). After init is reaped, the kernel asserts the process table is
-empty and that the physical frame count matches the pre-launch value: the
-whole fork/exec/wait cycle leaks nothing.
+`-EXDEV`) — and pipes (Appendix J): each end refuses the other's direction
+with the right errno, a small write/read round-trips byte-for-byte, a piped
+message survives a real `fork` (the child writes and closes both ends, the
+parent reads to `EOF` and reaps it through `wait4`), and a write with no
+readers left returns `-EPIPE` instead of hanging. After init is reaped, the
+kernel asserts the process table is empty and that the physical frame count
+matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
@@ -5114,6 +5119,9 @@ whole fork/exec/wait cycle leaks nothing.
   validation.
 - The kernel does not save FPU/SSE state, so user code is built `-mno-sse`
   (enforced by `USER_CFLAGS`); lazy FPU switching comes later.
+- Pipes have no `O_NONBLOCK` (every read/write blocks as needed) and, since
+  `dup`/`dup2` don't exist yet, no way to remap a pipe end onto fds 0/1/2
+  before an `execve` — the classic shell-pipeline construction needs both.
 
 <div style="page-break-after: always"></div>
 
@@ -5260,12 +5268,14 @@ syscall surface (Appendix H).
 
 Three objects, defined in `kernel/include/vfs.h`:
 
-- **`struct file_ops`** — a six-slot vtable: `read`, `write`, `lseek`,
-  `fstat`, `getdents`, `fsync`. Every open object is fully described by one
+- **`struct file_ops`** — six operation slots plus one lifecycle hook:
+  `read`, `write`, `lseek`, `fstat`, `getdents`, `fsync`, and `release`
+  (optional, called once right before the description is freed — pipes are
+  the first user, see below). Every open object is fully described by one
   ops table plus a node id; nothing above the filesystems switches on file
-  type. A `NULL` slot means "this *object* does not support the operation,"
-  and the syscall layer maps it to a fixed errno — the error vocabulary is
-  part of the interface:
+  type. A `NULL` operation slot means "this *object* does not support the
+  operation," and the syscall layer maps it to a fixed errno — the error
+  vocabulary is part of the interface:
 
   | NULL slot | errno | rationale |
   |---|---|---|
@@ -5283,8 +5293,10 @@ Three objects, defined in `kernel/include/vfs.h`:
 
 - **`struct file`** — an *open file description* (the POSIX term): ops
   pointer, node id (graphfs node or devfs minor), byte **offset**, the `O_*`
-  flags from open, and a reference count. The description — offset included —
-  is shared by every fd that `fork` duplicated; it is freed when the last
+  flags from open, a reference count, and `priv` — a `void *` free for a
+  file_ops implementation to use for anything `node` doesn't fit (a pipe's
+  shared ring buffer, see below). The description — offset included — is
+  shared by every fd that `fork` duplicated; it is freed when the last
   reference closes. Refcount updates run under `cpu_irq_save` (single CPU).
 
 - **The mount table** — compile-time in v1: the graphfs on the registered
@@ -5437,6 +5449,55 @@ interrupts-off section, and the keyboard IRQ handler wakes the published
 reader through a one-line notify hook (`keyboard_set_notify`). A `read_lock`
 mutex serializes concurrent readers so the single waiter slot suffices.
 
+## Pipes
+
+`kernel/fs/pipe.c` (Phase 6) is the first VFS object with no path and no
+mount: `pipe(2)` (syscall 22, Appendix H) allocates one shared 4 KiB ring
+buffer and two open file descriptions over it — a read end and a write end —
+directly, without going through `vfs_open`'s mount table at all. It exists
+to give the file_ops vtable its first user *beyond* graphfs and devfs, and
+the shape of what that took is the reusable part:
+
+- **`pipe_core.c`** is the ring buffer's index arithmetic (wraparound,
+  short reads/writes when the buffer under- or over-runs the request),
+  pure and host-tested exactly like `graphfs_core`/`virtq_core` — no
+  allocation, no blocking, no kernel dependency at all.
+- **`struct file` grew a `priv` field** (`void *`, alongside the existing
+  `node`) because a pipe's two ends need to reach the *same* shared ring
+  buffer, and that buffer isn't identified by a filesystem-scoped id the
+  way `node` is for graphfs and devfs — it needs a raw pointer.
+- **`struct file_ops` grew an optional `release` hook**, called once from
+  `vfs_file_put` right before the description is freed. graphfs and devfs
+  still don't use it (their per-node bookkeeping lives inline in
+  `vfs_file_put`); a pipe end uses it to decrement its shared buffer's
+  reader or writer count and wake the other side, which is what turns
+  "the last copy of the other end closed" into `EOF` (read) or `-EPIPE`
+  (write) instead of a leaked `struct pipe` or a wakeup nobody delivers.
+
+**Locking is deliberately not the VFS's sleeping `fs_lock`.** A pipe
+operation is a memory copy, not disk I/O — there is nothing slow to hold a
+lock across — so it follows the PMM/heap pattern instead: a plain
+interrupts-off critical section around the ring-buffer manipulation and the
+wait-queue push. `sched_block()` is called from inside that section, which
+is exactly what closes the lost-wakeup race (publish the wait, then block,
+without interrupts re-enabling in between) — the same contract devfs's
+console read and `wait4` rely on, reused a third and fourth time (two wait
+queues: readers block on empty, writers block on full). The wait queues
+reuse `thread->next`, exactly as `struct mutex`'s FIFO queue does — a thread
+blocked on a pipe is provably on no other queue at the same time.
+
+**Semantics**, matching Linux where there is a clean answer: `read` returns
+as soon as *any* data is available (a short read, never waits to fill the
+whole request) and returns `0` once the buffer is empty and every writer has
+closed (`EOF`, not a blocked-forever read); `write` loops internally and
+blocks on a full buffer until every requested byte is queued, and returns
+`-EPIPE` immediately if every reader has already closed. What isn't
+promised: write atomicity for writes larger than one buffer when multiple
+writers share a pipe (Linux guarantees this up to `PIPE_BUF`) — nothing in
+this kernel puts more than one writer on the same pipe yet, so there is no
+observer to violate the guarantee for; and `O_NONBLOCK` / `dup`-based
+pipeline wiring (Appendix H's known limits).
+
 ## Locking
 
 The kernel's first sleeping lock (`kernel/sched/mutex.c`, `struct mutex`)
@@ -5473,7 +5534,7 @@ marker proves it:
 ```
 vfs: graphfs root mounted rw (gen 7, 4081/4096 blocks free, 1018/1024 nodes free)
 vfs: devfs at /dev (console)
-user: launching init (/bin/init from disk, 13488 bytes)
+user: launching init (/bin/init from disk, 17688 bytes)
 ```
 
 ## Booting without a root filesystem

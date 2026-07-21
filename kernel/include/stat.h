@@ -15,6 +15,7 @@
 #define S_IFREG 0100000u
 #define S_IFDIR 0040000u
 #define S_IFCHR 0020000u
+#define S_IFIFO 0010000u
 
 /* open(2) flags. Everything the kernel implements; other bits are
  * rejected with -EINVAL rather than ignored. */

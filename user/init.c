@@ -432,6 +432,112 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
         return 85;
     }
 
+    /* --- pipes --- */
+
+    int pfd[2];
+    if (sys_pipe(pfd) != 0) {
+        return 86;
+    }
+    /* Each end refuses the wrong direction with the documented errno
+     * (read.h's table: write -EBADF, read -EINVAL, lseek -ESPIPE). */
+    if (sys_write(pfd[0], "x", 1) != -EBADF) {
+        return 87;
+    }
+    {
+        char one;
+        if (sys_read(pfd[1], &one, 1) != -EINVAL) {
+            return 88;
+        }
+    }
+    if (sys_lseek(pfd[0], 0, SEEK_SET) != -ESPIPE) {
+        return 89;
+    }
+    {
+        struct stat pst;
+        if (sys_fstat(pfd[0], &pst) != 0 || (pst.st_mode & S_IFMT) != S_IFIFO) {
+            return 90;
+        }
+    }
+    /* Byte-exact round trip: small enough it never has to block. */
+    static const char pmsg[] = "pipe round trip";
+    if (sys_write(pfd[1], pmsg, sizeof(pmsg)) != (long)sizeof(pmsg)) {
+        return 91;
+    }
+    {
+        char buf[sizeof(pmsg)];
+        if (sys_read(pfd[0], buf, sizeof(buf)) != (long)sizeof(buf)) {
+            return 92;
+        }
+        for (unsigned i = 0; i < sizeof(pmsg); i++) {
+            if (buf[i] != pmsg[i]) {
+                return 93;
+            }
+        }
+    }
+    if (sys_close(pfd[0]) != 0 || sys_close(pfd[1]) != 0) {
+        return 94;
+    }
+
+    /* Across fork: the child writes its half and closes both ends;
+     * the parent reads to EOF (the child's close, not its own, is
+     * what makes the writer count drop to zero) and reaps it. */
+    if (sys_pipe(pfd) != 0) {
+        return 95;
+    }
+    static const char cmsg[] = "from the child";
+    pid = sys_fork();
+    if (pid < 0) {
+        return 96;
+    }
+    if (pid == 0) {
+        sys_close(pfd[0]);
+        sys_write(pfd[1], cmsg, sizeof(cmsg));
+        sys_close(pfd[1]);
+        sys_exit(0);
+    }
+    sys_close(pfd[1]); /* the parent's copy: the child's is the last one */
+    {
+        char buf[64];
+        long got = 0;
+        long n = 0;
+        while (got < (long)sizeof(buf)) {
+            n = sys_read(pfd[0], buf + got, sizeof(buf) - (unsigned long)got);
+            if (n <= 0) {
+                break;
+            }
+            got += n;
+        }
+        if (n != 0 || got != (long)sizeof(cmsg)) {
+            return 97;
+        }
+        for (long i = 0; i < got; i++) {
+            if (buf[i] != cmsg[i]) {
+                return 98;
+            }
+        }
+    }
+    if (sys_wait4(-1, &wstatus, 0) != pid || wstatus != 0) {
+        return 99;
+    }
+    if (sys_close(pfd[0]) != 0) {
+        return 100;
+    }
+
+    /* No readers left: write reports -EPIPE instead of blocking
+     * forever (there is no SIGPIPE delivery in this kernel yet). */
+    if (sys_pipe(pfd) != 0) {
+        return 101;
+    }
+    if (sys_close(pfd[0]) != 0) {
+        return 102;
+    }
+    if (sys_write(pfd[1], "z", 1) != -EPIPE) {
+        return 103;
+    }
+    if (sys_close(pfd[1]) != 0) {
+        return 104;
+    }
+
     /* Patch the report in .data before printing it: proves the
      * write() source really is our mutable data segment. */
     report[6] = 'C';

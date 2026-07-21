@@ -32,8 +32,11 @@ Two questions drive the project:
 semantics. graphfs — our from-scratch copy-on-write property-graph filesystem — is
 mounted read-write at `/` through a VFS with devfs at `/dev`; userspace creates,
 writes, links, renames, and unlinks files with the Linux ABI, and after every boot
-test an fsck proves the written image is still perfectly consistent. Next: Phase 6,
-AI as a system service.**
+test an fsck proves the written image is still perfectly consistent. Phase 6 (AI as
+a system service) is now in progress: anonymous pipes (`pipe(2)`) landed first — a
+blocking producer/consumer byte stream with real reader/writer wakeups, the first
+VFS object that isn't graphfs or devfs — as the IPC groundwork the AI daemon and a
+future shell both need.**
 
 Phase 4 delivered a real process model — fork, execve, wait — running in ring 3 with full
 fault isolation.
@@ -56,9 +59,10 @@ from ring 3. A faulting process dies alone: a hardware exception in ring 3 kills
 process with the matching Linux signal (`SIGSEGV`, `SIGILL`, ...), reported to the parent
 through wait4, while the kernel and every other process keep running — the boot below
 shows two deliberately crashed children being reaped. Init's exit status 0 asserts
-eighty-five checks: segment integrity, register preservation across syscalls, every
-error path, the fork/exec/wait round trip, fault isolation itself, and the whole file
-surface below — read side and write path.
+104 checks: segment integrity, register preservation across syscalls, every error
+path, the fork/exec/wait round trip, fault isolation itself, the whole file surface
+— read side and write path — and pipes: a blocking round trip across a real `fork`,
+`EOF` once every writer has closed, `-EPIPE` once every reader has.
 
 Phase 5's storage stack is real end to end. The kernel scans the PCI bus, drives a
 **modern virtio-blk device implemented against the VIRTIO 1.2 specification**
@@ -112,17 +116,18 @@ pci: 7 functions
 virtio-blk: 16 MiB (32768 sectors), queue size 128
 block: virtio-blk, 16 MiB (4096 blocks of 4096), cache 256 KiB
 block: selftest passed (write/readback/restore)
-vfs: graphfs root mounted rw (gen 7, 4081/4096 blocks free, 1018/1024 nodes free)
+vfs: graphfs root mounted rw (gen 7, 4080/4096 blocks free, 1018/1024 nodes free)
 vfs: devfs at /dev (console)
 selftest: sched interleave "abcabcabcabc"
+selftest: pipes ok (blocking write/read, EOF, EPIPE)
 selftest: fs write path ok (create/write/rename/unlink cycles)
-selftest: passed (835 assertions)
-user: launching init (/bin/init from disk, 13488 bytes)
+selftest: passed (848 assertions)
+user: launching init (/bin/init from disk, 17688 bytes)
 hello from ring 3
 hello from execve
-trap: user fault: #PF page fault at rip=0x400f04 (error 0x6, cr2=0xffffffff80000000)
+trap: user fault: #PF page fault at rip=0x401384 (error 0x6, cr2=0xffffffff80000000)
 user: pid 3 (/bin/init) killed by signal 11
-trap: user fault: #UD invalid opcode at rip=0x400ef4 (error 0)
+trap: user fault: #UD invalid opcode at rip=0x401374 (error 0)
 user: pid 4 (/bin/init) killed by signal 4
 user: console open via /dev/console ok
 user: C init: .data .bss .rodata ok
@@ -140,7 +145,7 @@ boot: complete
 | 3 | Kernel threads and scheduling | ✅ done |
 | 4 | Ring 3 userspace, ELF loader, processes | ✅ done |
 | 5 | virtio-blk, VFS, graphfs — our native graph filesystem, full write path | ✅ done |
-| 6 | AI service layer: `/dev/ai`, AI daemon, natural-language shell | planned |
+| 6 | AI service layer: `/dev/ai`, AI daemon, natural-language shell | 🚧 in progress |
 | 7 | Linux syscall compatibility (static musl → busybox → dynamic) | planned |
 | 8 | Framebuffer GUI with AI-integrated command palette | planned |
 | 9 | Networking, TLS, local inference | planned |

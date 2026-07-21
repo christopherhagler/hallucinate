@@ -30,6 +30,7 @@
 #define ENOSPC       28 /* no space left on device */
 #define ESPIPE       29 /* illegal seek (not a seekable file) */
 #define EROFS        30 /* read-only filesystem */
+#define EPIPE        32 /* broken pipe: no readers left */
 #define ENAMETOOLONG 36 /* file name too long */
 #define ENOSYS       38 /* syscall not implemented */
 #define ENOTEMPTY    39 /* directory not empty */
