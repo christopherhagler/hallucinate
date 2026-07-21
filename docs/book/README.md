@@ -89,6 +89,7 @@ Two structural decisions shape almost every chapter, so learn them now:
 | J | [The VFS](appendix-j-vfs.md) | Mounts, open files, path normalization, devfs, locking |
 | K | [graphfs](appendix-k-graphfs.md) | The native filesystem's authoritative on-disk format |
 | L | [Testing](appendix-l-testing.md) | The three-level test strategy behind `make check` |
+| M | [Real Hardware](appendix-m-real-hardware.md) | Building the USB image, flashing it, and the disk-less boot smoke test |
 
 ## A note on how to read it
 

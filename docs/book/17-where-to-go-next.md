@@ -71,7 +71,10 @@ The short version, roughly in order:
    measure.
 5. **Port to real hardware.** The scariest and most educational step. Everything
    QEMU forgives, real firmware and real devices will not, and the gap *is* the
-   curriculum.
+   curriculum. The disk-less smoke test in [Appendix M](appendix-m-real-hardware.md)
+   is the first slice of this: it does not need AHCI/NVMe to be worth running,
+   because the bootloader, GDT/IDT, PMM/VMM, and scheduler are all real-hardware
+   risk on their own, well before storage is.
 
 ## 17.3 The habits that compound
 

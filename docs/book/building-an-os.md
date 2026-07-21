@@ -95,6 +95,7 @@ Two structural decisions shape almost every chapter, so learn them now:
 | J | [The VFS](appendix-j-vfs.md) | Mounts, open files, path normalization, devfs, locking |
 | K | [graphfs](appendix-k-graphfs.md) | The native filesystem's authoritative on-disk format |
 | L | [Testing](appendix-l-testing.md) | The three-level test strategy behind `make check` |
+| M | [Real Hardware](appendix-m-real-hardware.md) | Building the USB image, flashing it, and the disk-less boot smoke test |
 
 ## A note on how to read it
 
@@ -2955,7 +2956,42 @@ write-path checks (48 through 85, from `O_CREAT|O_EXCL` through the
 without a trace). Every `make check` is now a crash-consistency test of the
 write path, forever.
 
-## 14.8 The transferable lessons
+## 14.8 Booting without a disk: the last panic that had to go
+
+Every layer below the VFS already knew how to say "not present" instead of
+falling over: `virtio_blk_init` logs `virtio-blk: no device` and returns,
+`block_selftest` logs `block: selftest skipped (no device)` and returns. Only
+`vfs_init` still panicked — `if (bd == NULL) panic(...)` — because at the
+time it was written, nothing could run without a root filesystem, so a
+missing disk *was* fatal. That stopped being true the moment real hardware
+entered the picture: this kernel is going to boot on physical hardware
+(Appendix M) before an AHCI or NVMe driver exists to give it a disk at all,
+and a panic on the very first boot attempt is a wasted trip to the machine
+for a failure that was knowable in advance.
+
+The fix is smaller than it sounds, because the shape was already right one
+layer down. `vfs_init` mirrors the pattern: no device means devfs still
+comes up (`/dev/console` needs no disk) and the function returns instead of
+mounting anything. But `vfs_init` isn't a leaf — a dozen call sites assumed a
+mounted root without checking, from `vfs_open`'s fallthrough to graphfs down
+to `vfs_read_file`, and two boot-time callers (`process_run_init`, the fs
+selftest) needed to *ask* rather than find out by crashing. The honest fix
+touches every one of them: a `vfs_has_root()` accessor, an `-ENODEV` guard at
+each entry point that would otherwise dereference a null mount, and two call
+sites that check first and skip loudly instead of finding out through a
+kernel panic on an `ENOENT` no one expected. `process_run_init` in particular
+now says exactly what happened — `process: no root filesystem, skipping
+init` — instead of the caller-visible symptom being "init failed to load."
+
+The payoff is a genuine third boot configuration, not just a code path that
+compiles: `make check-boot-nodisk` boots the disk image with no virtio-blk
+device attached at all and asserts the kernel still reaches
+`boot: complete` having panicked nowhere, on every commit, forever — the same
+discipline that turned the write path into a permanent crash-consistency
+test now covers "what does this kernel do with no disk," months before there
+was hardware to try it on.
+
+## 14.9 The transferable lessons
 
 - **An ops vtable plus a refcounted description is the whole VFS trick.** Four
   ops tables, one dispatch site, POSIX offset-sharing from one refcount — no
@@ -2980,6 +3016,11 @@ write path, forever.
 - **Deviate loudly or not at all.** The `-EBUSY` unlink policy is a
   deliberate, written-down departure from POSIX with its lifting condition
   named — the opposite of a quiet shortcut.
+- **A hard requirement changes what "done" means for code you already
+  shipped.** Nothing about `vfs_init`'s panic was wrong when Phase 5 landed;
+  it became wrong the moment "runs on real hardware" turned from a goal into
+  a constraint every boot path has to satisfy, including the one where the
+  disk driver that constraint depends on doesn't exist yet.
 
 The kernel now walks one namespace from `/` to devices and disk files,
 nothing it runs is embedded in it, and the namespace changes under it —
@@ -3524,7 +3565,10 @@ The short version, roughly in order:
    measure.
 5. **Port to real hardware.** The scariest and most educational step. Everything
    QEMU forgives, real firmware and real devices will not, and the gap *is* the
-   curriculum.
+   curriculum. The disk-less smoke test in [Appendix M](appendix-m-real-hardware.md)
+   is the first slice of this: it does not need AHCI/NVMe to be worth running,
+   because the bootloader, GDT/IDT, PMM/VMM, and scheduler are all real-hardware
+   risk on their own, well before storage is.
 
 ## 17.3 The habits that compound
 
@@ -5022,6 +5066,12 @@ user: C init: .data .bss .rodata ok
 user: init exited (status 0)
 ```
 
+If `vfs_init()` found no disk (Appendix J), there is no `/bin/init` to read:
+`process_run_init()` checks `vfs_has_root()` first, logs `process: no root
+filesystem, skipping init`, and returns without touching the process table
+instead of panicking on the read failure. This is the expected path on real
+hardware before an AHCI/NVMe driver exists (Appendix M).
+
 Init doubles as the acceptance test for the loader, the ABI, the process
 model, and the whole VFS. Its exit status names the first failed check; 0
 means all eighty-five passed: `write` returns the full length, `.bss`
@@ -5178,8 +5228,11 @@ block: virtio-blk, 16 MiB (4096 blocks of 4096), cache 256 KiB
 block: selftest passed (write/readback/restore)
 ```
 
-A machine without a virtio-blk device still boots; storage-dependent
-features report the absence explicitly.
+A machine without a virtio-blk device still boots end to end — `block_selftest`
+skips with `block: selftest skipped (no device)`, and `vfs_init` mounts no
+root but still brings up devfs so `/dev/console` works (Appendix J). This is
+the real-hardware path today: there is no AHCI/NVMe driver yet, so every boot
+on physical hardware takes it until one exists (Appendix M).
 
 ## Known limits of this slice (lifted in later slices)
 
@@ -5422,6 +5475,43 @@ vfs: graphfs root mounted rw (gen 7, 4081/4096 blocks free, 1018/1024 nodes free
 vfs: devfs at /dev (console)
 user: launching init (/bin/init from disk, 13488 bytes)
 ```
+
+## Booting without a root filesystem
+
+`vfs_init()` no longer treats a missing disk as fatal. `block_root()` returns
+`NULL` when no driver claimed a device — the expected state on real hardware
+before an AHCI/NVMe driver exists (Appendix I's virtio-blk driver has nothing
+to bind to outside QEMU), and the deliberate state of a disk-less smoke-test
+boot. In that case `vfs_init()` still brings up devfs (`/dev/console` needs no
+disk) and returns without mounting a root:
+
+```
+vfs: no block device found — booting without a root filesystem
+vfs: devfs at /dev (console)
+```
+
+`vfs_has_root()` reports which state the kernel is in. Every VFS entry point
+that would otherwise dereference the (now `NULL`) root mount checks it first
+and answers `-ENODEV` instead of crashing — `vfs_open` for any path outside
+`/dev`, `vfs_mkdir`/`rmdir`/`unlink`/`link`/`rename`, and `vfs_read_file`.
+`/dev/console` keeps working either way, because devfs never depends on
+`root_fs`.
+
+Two boot-time callers check `vfs_has_root()` themselves rather than relying on
+`-ENODEV` propagating: the in-kernel fs selftest (`selftest_run`, Appendix L)
+skips `test_fs()` and logs `selftest: fs write-path test skipped (no root
+filesystem)`, and `process_run_init()` (Appendix H) logs `process: no root
+filesystem, skipping init` and returns without touching the process table —
+there is no `/bin/init` to load `/bin/init` from. `kmain` falls through to the
+same interactive keyboard-echo loop it would reach after a normal boot, so a
+disk-less boot still proves the entire chain up through interrupts, the
+scheduler, and the console: exactly what an early real-hardware smoke test
+needs before an AHCI driver exists. See Appendix M for how that smoke test is
+run on physical hardware.
+
+A device that *is* present but carries no valid graphfs is a different
+situation and still panics — that disk was supposed to have a filesystem on
+it, and mounting garbage silently would be worse than stopping.
 
 ## Verification
 
@@ -5699,9 +5789,11 @@ the on-disk layout.
 
 # Testing
 
-`make check` is the gate for every commit. It runs two automated suites; a third level
-(in-kernel self-tests) executes inside the second. All three accumulate over the life of
-the project so regressions in earlier phases are caught forever.
+`make check` is the gate for every commit. It runs host unit tests plus two QEMU
+boot integration runs (with and without a disk attached); in-kernel self-tests
+are a level of their own that executes inside both boot runs. All of it
+accumulates over the life of the project so regressions in earlier phases are
+caught forever.
 
 ## Level 1 — host unit tests (`make check-host`)
 
@@ -5742,9 +5834,15 @@ selftest: passed (N assertions)
 
 A failed check panics, which the integration harness detects. Self-tests are cheap by
 design (they run on every boot) — heavy stress tests belong at level 1 or behind a
-dedicated integration scenario.
+dedicated integration scenario. When there is no root filesystem (see below), `test_fs`
+is skipped rather than run against a mount that does not exist:
 
-## Level 3 — QEMU integration test (`make check-boot`)
+```
+selftest: fs write-path test skipped (no root filesystem)
+selftest: passed (N assertions)
+```
+
+## Level 3 — QEMU integration tests (`make check-boot`, `make check-boot-nodisk`)
 
 `tests/run_qemu.py` boots the actual disk image headless:
 
@@ -5753,22 +5851,32 @@ qemu-system-x86_64 -m 256M -drive file=disk.img,format=raw \
     -serial stdio -display none -monitor none -no-reboot
 ```
 
-It asserts that the expected markers appear on the serial console **in order** —
-the authoritative list is `PASS_MARKERS` in `tests/run_qemu.py`, one marker per
-proven subsystem, from the banner through memory, scheduling, the in-kernel
-self-tests, and the ring 3 round trip (`hello from ring 3` is printed by user
-code) to `boot: complete`.
-
-and fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on a 30 s
+It asserts that the expected markers appear on the serial console **in order**, and
+fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on a 30 s
 timeout. On failure the full serial transcript is printed. The bootloader and kernel are
 written so that every fatal path emits one of the failure patterns — a hang without
 output is the only failure mode the harness can attribute solely to a timeout.
 
-The guest boots a throwaway *copy* of `fs.img` and writes to it all boot long — the
-block selftest, the in-kernel fs stress cycles, init's write-path checks. After the
-markers pass, the harness runs `graphfs_fsck` over that written image and fails the
-test unless it is perfectly consistent: **every boot test is also an end-to-end
-crash-consistency test of the write path** (`--fsck`, wired in by `make check-boot`).
+Two configurations run, both gated by `make check`:
+
+- **`check-boot`** attaches `fs.img` as a virtio-blk device, the normal case. The
+  guest boots a throwaway *copy* and writes to it all boot long — the block
+  selftest, the in-kernel fs stress cycles, init's write-path checks. After the
+  markers pass, the harness runs `graphfs_fsck` over that written image and fails
+  the test unless it is perfectly consistent: **every boot test is also an
+  end-to-end crash-consistency test of the write path** (`--fsck`).
+  Authoritative marker list: `PASS_MARKERS_WITH_DISK`, one marker per proven
+  subsystem, from the banner through memory, scheduling, the in-kernel
+  self-tests, and the ring 3 round trip (`hello from ring 3` is printed by user
+  code) to `boot: complete`.
+- **`check-boot-nodisk`** attaches no `fs.img` at all — the same disk-less state
+  real hardware is in before an AHCI/NVMe driver exists (Appendix M). Every
+  layer must degrade instead of panicking: `virtio-blk: no device`,
+  `block: selftest skipped (no device)`, `vfs: no block device found`,
+  `process: no root filesystem, skipping init`, and still `boot: complete`.
+  Authoritative marker list: `PASS_MARKERS_NO_DISK`. This is what proves the
+  real-hardware smoke test will not simply panic before AHCI exists — checked
+  on every commit, not just the day someone has a USB stick in hand.
 
 As the OS grows, new integration scenarios add markers (and eventually scripted input via
 the QEMU monitor); existing markers are never removed, only extended.
@@ -5786,5 +5894,205 @@ the QEMU monitor); existing markers are never removed, only extended.
 - A bug fix lands with a test that failed before the fix.
 - A feature is not done until it is covered at the appropriate level(s): pure logic at
   level 1, boot-visible behavior at level 3, invariants at level 2.
+
+<div style="page-break-after: always"></div>
+
+# Real Hardware: Flashing and Booting
+
+Every other test in this project runs the kernel under QEMU, which is honest
+about most things and generous about a few: it always has a disk if you ask
+for one, its firmware is predictable, and its E820 map, VBE modes, and A20
+handling never surprise anyone. "I will run this on real hardware so it must
+work on a real machine" (the project's own stated requirement) means that
+generosity has to be tested against, not just documented — early, before the
+gap between QEMU and a physical board turns into a long debugging session on
+borrowed hardware. This appendix covers the current smoke test: getting the
+kernel to boot on a real machine, with no filesystem disk yet, and observing
+that it degrades the way Chapter 14 §14.8 says it should instead of
+panicking.
+
+## What this test proves, and what it doesn't
+
+There is no AHCI or NVMe driver yet — only the virtio-blk driver, which no
+real desktop board speaks. So this smoke test necessarily boots **without a
+filesystem disk**, exercising the disk-less path documented in Appendix J
+and gated on every commit by `make check-boot-nodisk`. It proves:
+
+- The bootloader's real-mode → protected-mode → long-mode transition, A20
+  handling, and E820 parsing survive contact with real BIOS firmware instead
+  of QEMU's.
+- GDT/TSS/IDT setup, the PIC, PMM/VMM bring-up, the kernel heap, and the
+  scheduler all initialize on real silicon.
+- The PS/2 keyboard driver and VGA text console (or a real serial port —
+  see below) work against real hardware, not an emulated 8042 and a fake
+  UART.
+- The graceful-degradation path added alongside this appendix — no panic
+  when `vfs_init` finds no disk — actually holds outside QEMU, not just in
+  the two `run_qemu.py` configurations.
+
+It does **not** prove storage works on real hardware (no driver exists for
+the board's AHCI/NVMe controller yet), and it does not launch userspace
+(`process_run_init` has nothing to load `/bin/init` from). Both are future
+work tracked in Chapter 17. This is a firmware-and-core-kernel test, not a
+full-system one.
+
+## Target hardware
+
+The reference machine for this project (see the repo's project notes) is:
+
+- **CPU:** AMD Ryzen 9, socket AM4 (Zen 2/3) — no integrated GPU, so a
+  discrete GPU is required for video output.
+- **Motherboard:** MSI B550 GAMING PLUS, MSI Click BIOS 5.
+- **Storage:** SATA/AHCI and an M.2 NVMe slot — neither has a driver yet
+  (see above).
+- **I/O relevant to this OS:** a physical PS/2 combo port (this kernel's
+  PS/2 driver talks to it directly, no USB HID layer needed) and a JCOM1
+  header for a real RS-232 serial console (verify pin-out against the board
+  manual before wiring a bracket — get this wrong and you risk the board,
+  not just a boot).
+
+Any similarly-specced board should work; the BIOS menu names below are
+MSI's, adjust for other vendors.
+
+## Step 1: build the image
+
+```
+make usbimg
+```
+
+This builds `build/disk.img` (identical to what `make run`/`make check` use)
+and prints the flashing command. `disk.img` (`tools/mkimage.py`) is already
+a raw MBR image — stage 1 boot sector at LBA 0, stage 2 and the kernel ELF
+padded and laid out after it, the whole thing rounded up to a MiB. Writing
+it byte-for-byte to a USB stick's raw block device makes that stick boot the
+same way QEMU's `-drive file=disk.img,format=raw` does; there is no separate
+"USB format" step.
+
+## Step 2: flash a USB stick
+
+**This step writes directly to a block device. Getting the target wrong
+overwrites an arbitrary disk, up to and including the one macOS is running
+from.** `tools/flash_usb.sh` exists specifically to make that mistake hard:
+it refuses to run without an explicit device argument, refuses to touch
+whatever `diskutil info /` reports as the boot disk, and requires you to
+retype the device path at a confirmation prompt before it unmounts anything.
+
+```
+diskutil list                      # find the stick, e.g. /dev/disk4 (NOT diskNsM)
+make flash-usb DEV=/dev/disk4      # or: tools/flash_usb.sh /dev/disk4
+```
+
+It unmounts the disk, `dd`s the image to its **raw** device node
+(`/dev/rdiskN` — an order of magnitude faster than the buffered node on
+macOS), and ejects when done. Press Ctrl+T during the `dd` for a progress
+report (BSD `dd` honors `SIGINFO`; there is no `status=progress` on macOS).
+
+On Linux, there is no `diskutil`; find the device with `lsblk`, make sure
+nothing under it is mounted, and run
+`sudo dd if=build/disk.img of=/dev/sdX bs=4M status=progress conv=fsync`
+by hand, same caution about the target applying.
+
+## Step 3: BIOS configuration (MSI Click BIOS 5)
+
+This bootloader is a classic BIOS/MBR chain (`INT 13h` extended reads, a
+0xAA55 signature) — it needs **CSM** (Compatibility Support Module), MSI's
+"Legacy+UEFI" boot mode, not pure UEFI. Enable it before the first boot
+attempt:
+
+1. Enter setup: power on, tap **Del** (or **F2**) repeatedly.
+2. Switch to **Advanced Mode** (F7 toggles it) if the board opens to EZ
+   Mode.
+3. **Settings → Advanced → Windows OS Configuration → BIOS Legacy/UEFI
+   mode** → set to **Legacy+UEFI** (this is the CSM toggle on this board;
+   pure **Legacy** also works if offered and UEFI boot of anything else
+   isn't needed).
+4. **Settings → Advanced → Integrated Graphics Configuration**, if present
+   and a discrete GPU is installed: confirm the discrete GPU is the primary
+   display adapter.
+5. Save and exit (**F10**), then immediately tap **F11** for the one-time
+   boot menu and pick the USB stick, or set **Settings → Boot → Boot
+   Option #1** to the USB device for a persistent change.
+
+**CSM caveat:** the discrete GPU needs a legacy VBIOS option ROM to show any
+video output at all before an OS driver loads (true for essentially every
+GPU through the RTX 30 / RX 6000 generation; newer cards increasingly drop
+legacy VBIOS support entirely — check the card's spec page if video output
+is blank). If video never comes up, the serial console (next section) is
+the fallback for diagnosis regardless.
+
+## Step 4: watching it boot
+
+**VGA (default):** the kernel's text-mode console is the fallback path and
+needs no configuration; connect a monitor to the discrete GPU.
+
+**Serial (recommended if the JCOM1 header is wired to a bracket):** this
+kernel also writes every `kprintf` to the first UART, same as QEMU's
+`-serial stdio`. From another machine:
+
+```
+screen /dev/tty.usbserial-XXXX 115200   # macOS, adjust device name
+```
+
+A serial console is strictly better for this test: it survives a video-side
+failure, and the transcript can be copied for comparison against the
+`PASS_MARKERS_NO_DISK` list in `tests/run_qemu.py` (Appendix L) line for
+line.
+
+## What a successful boot looks like
+
+The transcript should match the shape of `PASS_MARKERS_NO_DISK`
+(`tests/run_qemu.py`) — the same sequence `make check-boot-nodisk` asserts
+in CI, just on real firmware instead of QEMU's:
+
+```
+Hallucinate OS v0.5.0 (x86_64)
+cpu: GDT/TSS loaded, IDT ready (256 vectors), PIC remapped and masked
+e820: N entries
+...
+pmm: ...
+vmm: kernel page tables active
+heap: slab allocator ready
+sched: online, round-robin, 10 ms timeslice
+syscall: SYSCALL/SYSRET ready (Linux x86_64 ABI numbering)
+timer: 100 Hz, ticking (slept N ticks)
+pci: N functions
+virtio-blk: no device
+block: selftest skipped (no device)
+vfs: no block device found — booting without a root filesystem
+vfs: devfs at /dev (console)
+selftest: ... (all levels pass)
+selftest: fs write-path test skipped (no root filesystem)
+selftest: passed (N assertions)
+process: no root filesystem, skipping init
+boot: complete
+keyboard: type on this console; input echoes here
+```
+
+Once `boot: complete` prints, typing on the keyboard should echo to the
+console: that loop is standing in for a shell until Phase 6, and on real
+hardware it is also the first proof that the PS/2 driver and IRQ routing
+work outside an emulator.
+
+## Diverging from the expected transcript
+
+Expect the *shape* to survive but the *numbers* not to: real E820 maps have
+more entries and different reserved regions than QEMU's, usable RAM will
+differ, and PCI enumeration will list real devices instead of QEMU's
+synthetic ones. A difference in a count or address is not a bug by itself —
+compare against the marker list's fixed strings (Appendix L), not the
+interpolated numbers.
+
+If the machine hangs before any output: check CSM/Legacy mode is really
+active (some boards partially ignore the setting for USB devices
+specifically), try the other USB port type (2.0 vs 3.0 controllers are
+sometimes on different legacy code paths), and confirm the stick was
+written to the raw device node, not a partition. If it hangs after some
+output: the last marker printed identifies the failing subsystem directly.
+
+A `PANIC` on real hardware that never triggers in the `check-boot-nodisk`
+QEMU run is itself a finding — it means a firmware assumption QEMU was
+quietly generous about (E820 shape, an unexpected PCI device class, a BIOS
+quirk in the `INT 13h` extended-read path) needs a fix, which is exactly
+what an *early* smoke test is for.
 
 <div style="page-break-after: always"></div>

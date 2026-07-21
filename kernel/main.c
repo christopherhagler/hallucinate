@@ -134,7 +134,7 @@ void kmain(uint64_t bootinfo_phys) {
      * Interactive placeholder until the shell exists (Phase 6): echo
      * keyboard input to both consoles, halting between interrupts.
      */
-    kprintf("keyboard: type in the QEMU window; input echoes here\n");
+    kprintf("keyboard: type on this console; input echoes here\n");
     for (;;) {
         int c = keyboard_getchar();
         if (c < 0) {

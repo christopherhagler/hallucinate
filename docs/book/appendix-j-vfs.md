@@ -229,6 +229,43 @@ vfs: devfs at /dev (console)
 user: launching init (/bin/init from disk, 13488 bytes)
 ```
 
+## Booting without a root filesystem
+
+`vfs_init()` no longer treats a missing disk as fatal. `block_root()` returns
+`NULL` when no driver claimed a device — the expected state on real hardware
+before an AHCI/NVMe driver exists (Appendix I's virtio-blk driver has nothing
+to bind to outside QEMU), and the deliberate state of a disk-less smoke-test
+boot. In that case `vfs_init()` still brings up devfs (`/dev/console` needs no
+disk) and returns without mounting a root:
+
+```
+vfs: no block device found — booting without a root filesystem
+vfs: devfs at /dev (console)
+```
+
+`vfs_has_root()` reports which state the kernel is in. Every VFS entry point
+that would otherwise dereference the (now `NULL`) root mount checks it first
+and answers `-ENODEV` instead of crashing — `vfs_open` for any path outside
+`/dev`, `vfs_mkdir`/`rmdir`/`unlink`/`link`/`rename`, and `vfs_read_file`.
+`/dev/console` keeps working either way, because devfs never depends on
+`root_fs`.
+
+Two boot-time callers check `vfs_has_root()` themselves rather than relying on
+`-ENODEV` propagating: the in-kernel fs selftest (`selftest_run`, Appendix L)
+skips `test_fs()` and logs `selftest: fs write-path test skipped (no root
+filesystem)`, and `process_run_init()` (Appendix H) logs `process: no root
+filesystem, skipping init` and returns without touching the process table —
+there is no `/bin/init` to load `/bin/init` from. `kmain` falls through to the
+same interactive keyboard-echo loop it would reach after a normal boot, so a
+disk-less boot still proves the entire chain up through interrupts, the
+scheduler, and the console: exactly what an early real-hardware smoke test
+needs before an AHCI driver exists. See Appendix M for how that smoke test is
+run on physical hardware.
+
+A device that *is* present but carries no valid graphfs is a different
+situation and still panics — that disk was supposed to have a filesystem on
+it, and mounting garbage silently would be worse than stopping.
+
 ## Verification
 
 - `vfs_path_norm` is host-tested exhaustively (canonical forms, `..` at every

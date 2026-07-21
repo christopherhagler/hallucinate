@@ -494,6 +494,15 @@ long process_wait4(int pid_arg, uint64_t uwstatus, int options, uint64_t urusage
 
 void process_run_init(void) {
     proc_table_init(&ptable);
+    if (!vfs_has_root()) {
+        /* No root filesystem: /bin/init has nowhere to live. This is
+         * expected on real hardware before a disk driver exists (or
+         * a deliberate disk-less smoke test) — report it and let the
+         * kernel fall through to whatever diagnostic mode main()
+         * runs instead of userspace, rather than panicking. */
+        kprintf("process: no root filesystem, skipping init\n");
+        return;
+    }
     static const char *const INIT_PATH = "/bin/init";
 
     uint64_t frames_before = pmm_free_frames();

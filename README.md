@@ -158,7 +158,13 @@ brew install nasm lld llvm qemu
 make          # build build/disk.img
 make run      # boot it in QEMU (VGA window + serial on stdio)
 make check    # run all test suites
+make usbimg   # build the same image and print USB-flashing instructions
 ```
+
+`build/disk.img` is already a raw, BIOS-bootable MBR image — flashing it to a USB stick
+and booting real hardware is covered end to end in
+[docs/book/appendix-m-real-hardware.md](docs/book/appendix-m-real-hardware.md), including
+a safety-checked `tools/flash_usb.sh`.
 
 ## Testing
 
@@ -168,10 +174,12 @@ make check    # run all test suites
   scheduler policy, keyboard translation, ELF validator, virtqueue bookkeeping, graphfs
   including its whole write path, path normalization) compiled for macOS and run under
   AddressSanitizer/UBSan.
-- **Boot integration test** — a headless QEMU boot of the real disk image, asserting that
-  the expected markers appear on the serial console in order and that no panic occurs —
-  then `graphfs_fsck` verifies the filesystem image the guest wrote to during the boot,
-  so every boot test is also a crash-consistency test of the write path.
+- **Boot integration tests** — two headless QEMU boots of the real disk image, asserting
+  that the expected markers appear on the serial console in order and that no panic
+  occurs: one with the filesystem disk attached (`graphfs_fsck` then verifies the image
+  the guest wrote to, so it's also a crash-consistency test of the write path), and one
+  with **no disk at all** — the state real hardware is in before an AHCI/NVMe driver
+  exists, proving the kernel degrades instead of panicking (docs/book/appendix-m).
 - **Filesystem check** — `graphfs_fsck` verifies every invariant of the built `fs.img`.
 
 A third level, in-kernel self-tests, runs on every boot (including a filesystem write

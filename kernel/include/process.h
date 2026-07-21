@@ -30,8 +30,10 @@ struct syscall_frame;
  * Launch init from /bin/init on the root filesystem, wait for it —
  * and transitively everything it forked — to exit, and tear the
  * process table down. Requires the scheduler, syscall_init(), and
- * vfs_init(). Panics if init cannot be loaded, exits leaving
- * processes behind, or leaks frames.
+ * vfs_init(). If vfs_init() found no root filesystem (vfs_has_root()
+ * false), this logs and returns without starting anything — there
+ * is nothing to launch init from. Otherwise panics if init cannot be
+ * loaded, exits leaving processes behind, or leaks frames.
  */
 void process_run_init(void);
 

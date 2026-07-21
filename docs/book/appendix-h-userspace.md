@@ -221,6 +221,12 @@ user: C init: .data .bss .rodata ok
 user: init exited (status 0)
 ```
 
+If `vfs_init()` found no disk (Appendix J), there is no `/bin/init` to read:
+`process_run_init()` checks `vfs_has_root()` first, logs `process: no root
+filesystem, skipping init`, and returns without touching the process table
+instead of panicking on the read failure. This is the expected path on real
+hardware before an AHCI/NVMe driver exists (Appendix M).
+
 Init doubles as the acceptance test for the loader, the ABI, the process
 model, and the whole VFS. Its exit status names the first failed check; 0
 means all eighty-five passed: `write` returns the full length, `.bss`

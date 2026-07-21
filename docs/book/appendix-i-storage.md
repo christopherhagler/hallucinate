@@ -109,8 +109,11 @@ block: virtio-blk, 16 MiB (4096 blocks of 4096), cache 256 KiB
 block: selftest passed (write/readback/restore)
 ```
 
-A machine without a virtio-blk device still boots; storage-dependent
-features report the absence explicitly.
+A machine without a virtio-blk device still boots end to end — `block_selftest`
+skips with `block: selftest skipped (no device)`, and `vfs_init` mounts no
+root but still brings up devfs so `/dev/console` works (Appendix J). This is
+the real-hardware path today: there is no AHCI/NVMe driver yet, so every boot
+on physical hardware takes it until one exists (Appendix M).
 
 ## Known limits of this slice (lifted in later slices)
 

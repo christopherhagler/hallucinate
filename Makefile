@@ -6,7 +6,10 @@
 # Primary targets:
 #   all          build the bootable disk image (default)
 #   run          boot the image in QEMU with a window + serial on stdio
-#   check        host unit tests (ASan/UBSan) + QEMU boot integration test
+#   check        host unit tests (ASan/UBSan) + QEMU boot tests (with and
+#                without a disk) + post-build fsck
+#   usbimg       build the same disk image and print USB-flashing instructions
+#   flash-usb    write it to DEV=/dev/diskN (macOS; see appendix M)
 #   format       apply clang-format to all C sources and headers
 #   format-check fail if any file is not clang-format clean
 #   tidy         run clang-tidy static analysis over the kernel
@@ -138,6 +141,27 @@ QEMU_FLAGS := -m 256M -drive file=$(BUILD)/disk.img,format=raw \
 run: $(BUILD)/disk.img $(BUILD)/fs.img
 	$(QEMU) $(QEMU_FLAGS) -serial stdio
 
+# ------------------------------------------------------------ real hardware --
+
+# disk.img (tools/mkimage.py) is already a raw MBR image: written
+# byte-for-byte to a USB stick, it boots real hardware the same way it boots
+# QEMU's INT13 path. This target exists so "build the USB image" has an
+# obvious name and fails loudly here rather than mid-flash if disk.img
+# didn't build. See docs/book/appendix-m-real-hardware.md.
+.PHONY: usbimg
+usbimg: $(BUILD)/disk.img
+	@echo "USB-bootable image ready: $(BUILD)/disk.img"
+	@echo "Flash it:  tools/flash_usb.sh /dev/diskN   (macOS; see appendix M)"
+	@echo "Or:        make flash-usb DEV=/dev/diskN"
+
+# DEV is required and unexpanded until here, so a bare "make flash-usb"
+# fails fast instead of flash_usb.sh prompting for a device that was never
+# actually checked.
+.PHONY: flash-usb
+flash-usb: $(BUILD)/disk.img
+	@test -n "$(DEV)" || { echo "usage: make flash-usb DEV=/dev/diskN  (see: diskutil list)"; exit 1; }
+	tools/flash_usb.sh $(DEV)
+
 # -------------------------------------------------------------- host tests --
 
 # The freestanding lib is compiled for the host with its public symbols
@@ -177,8 +201,8 @@ $(BUILD)/host_tests: $(HOST_TEST_SRCS) tests/host/test.h \
 
 # ------------------------------------------------------------------ checks --
 
-.PHONY: check check-host check-boot check-fsck
-check: check-host check-boot check-fsck
+.PHONY: check check-host check-boot check-boot-nodisk check-fsck
+check: check-host check-boot check-boot-nodisk check-fsck
 	@echo "make check: all suites passed"
 
 check-host: $(BUILD)/host_tests
@@ -187,6 +211,14 @@ check-host: $(BUILD)/host_tests
 check-boot: $(BUILD)/disk.img $(BUILD)/fs.img $(BUILD)/graphfs_fsck tests/run_qemu.py
 	$(PY) tests/run_qemu.py --image $(BUILD)/disk.img --fsimg $(BUILD)/fs.img \
 	    --fsck $(BUILD)/graphfs_fsck --qemu $(QEMU)
+
+# No --fsimg: no virtio-blk device attached at all, the state real hardware
+# is in before an AHCI/NVMe driver exists. Proves the disk-less boot path
+# (vfs_init, the fs selftest, process_run_init all degrading instead of
+# panicking) on every commit, not just the day someone finally has a USB
+# stick in hand. See docs/book/appendix-m-real-hardware.md.
+check-boot-nodisk: $(BUILD)/disk.img tests/run_qemu.py
+	$(PY) tests/run_qemu.py --image $(BUILD)/disk.img --qemu $(QEMU)
 
 # Verify the freshly built filesystem image is structurally sound — and after
 # every boot test, run_qemu.py re-runs the same fsck on the image the guest

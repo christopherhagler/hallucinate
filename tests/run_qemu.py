@@ -10,6 +10,13 @@ With --fsck, the filesystem image the guest booted (and wrote to: the block
 selftest, the in-kernel fs stress test, init's write-path checks) is verified
 by graphfs_fsck after the run — every boot test doubles as an end-to-end
 crash-consistency test of the write path.
+
+Without --fsimg, no virtio-blk device is attached at all — the same
+disk-less state a real machine is in before an AHCI/NVMe driver exists
+(docs/book/appendix-m-real-hardware.md). That is a distinct, still-must-pass
+boot path: no panic, devfs still comes up, init is skipped rather than
+crashing on a missing /bin/init. A different marker list is expected in this
+mode; see PASS_MARKERS_NO_DISK below.
 """
 
 import argparse
@@ -21,7 +28,7 @@ import tempfile
 import threading
 import time
 
-PASS_MARKERS = [
+PASS_MARKERS_WITH_DISK = [
     "Hallucinate OS",
     "cpu: GDT/TSS loaded",
     "e820:",
@@ -52,6 +59,33 @@ PASS_MARKERS = [
     "boot: complete",
 ]
 
+# No virtio-blk device attached at all — the state a real machine is in
+# before an AHCI/NVMe driver exists. Every layer must degrade instead of
+# panicking: virtio_blk_init finds nothing, block_selftest and vfs_init and
+# the fs selftest and process_run_init all skip their disk-dependent work
+# and say so, and the kernel still reaches the interactive keyboard loop.
+PASS_MARKERS_NO_DISK = [
+    "Hallucinate OS",
+    "cpu: GDT/TSS loaded",
+    "e820:",
+    "pmm: ",
+    "vmm: kernel page tables active",
+    "heap: slab allocator ready",
+    "sched: online",
+    "syscall: SYSCALL/SYSRET ready",
+    "timer: 100 Hz, ticking",
+    "pci: ",
+    "virtio-blk: no device",
+    "block: selftest skipped (no device)",
+    "vfs: no block device found",
+    "vfs: devfs at /dev",
+    "selftest: sched interleave",
+    "selftest: fs write-path test skipped (no root filesystem)",
+    "selftest: passed",
+    "process: no root filesystem, skipping init",
+    "boot: complete",
+]
+
 FAIL_PATTERNS = [
     "PANIC",
     "ERR:",
@@ -66,6 +100,8 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--qemu", default="qemu-system-x86_64")
     args = ap.parse_args()
+
+    PASS_MARKERS = PASS_MARKERS_WITH_DISK if args.fsimg else PASS_MARKERS_NO_DISK
 
     cmd = [
         args.qemu,

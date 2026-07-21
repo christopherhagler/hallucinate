@@ -79,11 +79,25 @@ struct file {
 
 /*
  * Mount the graphfs root (writable) from the registered block
- * device and initialize devfs. Requires the block device, kmalloc,
- * and the scheduler. Panics if there is no disk or no valid
- * filesystem on it — nothing can run without one.
+ * device and initialize devfs. Requires kmalloc and the scheduler.
+ *
+ * A disk is not required to boot: if block_root() found no device
+ * (no disk driver claimed one — real hardware before an AHCI/NVMe
+ * driver exists, or a deliberate disk-less smoke test), the root
+ * filesystem is simply left unmounted and devfs still comes up, so
+ * /dev/console keeps working. See vfs_has_root(). A device that IS
+ * present but carries no valid graphfs is still a panic — that disk
+ * was supposed to have a filesystem on it.
  */
 void vfs_init(void);
+
+/* Nonzero once vfs_init() mounted a root filesystem; zero if it
+ * booted without a disk. Every vfs_* call that needs the root
+ * answers -ENODEV instead of crashing when this is false; /dev
+ * keeps working either way. Callers that cannot proceed without a
+ * root fs (process_run_init, the fs selftest) check this to skip
+ * gracefully instead of tripping over a NULL mount. */
+int vfs_has_root(void);
 
 /*
  * Resolve `path` and build an open file description. Supported

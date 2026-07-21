@@ -481,6 +481,9 @@ long vfs_open(const char *path, int flags, unsigned mode, struct file **out) {
             return m->open(rel, flags, out);
         }
     }
+    if (root_fs == NULL) {
+        return -ENODEV; /* no root filesystem mounted */
+    }
     return gfs_open(canon, flags, mode, out);
 }
 
@@ -521,6 +524,9 @@ long vfs_mkdir(const char *path, unsigned mode) {
     if (on_devfs(canon)) {
         return -EPERM; /* devfs is structurally immutable */
     }
+    if (root_fs == NULL) {
+        return -ENODEV;
+    }
     char parent[VFS_PATH_MAX];
     const char *name = NULL;
     path_split(canon, parent, &name);
@@ -546,6 +552,9 @@ long vfs_unlink(const char *path) {
     }
     if (on_devfs(canon)) {
         return -EPERM;
+    }
+    if (root_fs == NULL) {
+        return -ENODEV;
     }
     char parent[VFS_PATH_MAX];
     const char *name = NULL;
@@ -584,6 +593,9 @@ long vfs_rmdir(const char *path) {
     }
     if (on_devfs(canon)) {
         return -EPERM;
+    }
+    if (root_fs == NULL) {
+        return -ENODEV;
     }
     char parent[VFS_PATH_MAX];
     const char *name = NULL;
@@ -626,6 +638,9 @@ long vfs_link(const char *oldpath, const char *newpath) {
     }
     if (strcmp(ncanon, "/") == 0) {
         return -EEXIST;
+    }
+    if (root_fs == NULL) {
+        return -ENODEV;
     }
     char parent[VFS_PATH_MAX];
     const char *name = NULL;
@@ -671,6 +686,9 @@ long vfs_rename(const char *oldpath, const char *newpath) {
     if (on_devfs(ocanon) || on_devfs(ncanon)) {
         return (on_devfs(ocanon) && on_devfs(ncanon)) ? -EPERM : -EXDEV;
     }
+    if (root_fs == NULL) {
+        return -ENODEV;
+    }
     char oparent[VFS_PATH_MAX];
     char nparent[VFS_PATH_MAX];
     const char *oname = NULL;
@@ -712,6 +730,9 @@ long vfs_read_file(const char *path, void **buf_out, uint64_t *size_out) {
     long rc = vfs_path_norm(path, canon, sizeof(canon));
     if (rc != 0) {
         return rc;
+    }
+    if (root_fs == NULL) {
+        return -ENODEV;
     }
 
     mutex_lock(&fs_lock);
@@ -758,10 +779,23 @@ void vfs_stats(uint64_t *generation, uint64_t *free_blocks, uint64_t *free_nodes
     mutex_unlock(&fs_lock);
 }
 
+int vfs_has_root(void) {
+    return root_fs != NULL;
+}
+
 void vfs_init(void) {
     struct bdev *bd = block_root();
     if (bd == NULL) {
-        panic("vfs: no block device to mount the root filesystem from");
+        /* No disk driver claimed a device (real hardware without an
+         * AHCI/NVMe driver yet, or a deliberately disk-less smoke
+         * test). devfs does not need a disk, so /dev/console still
+         * works: bring it up and let the caller decide what a system
+         * with no root filesystem does, instead of taking the whole
+         * boot down with it. */
+        kprintf("vfs: no block device found — booting without a root filesystem\n");
+        devfs_init();
+        kprintf("vfs: devfs at /dev (console)\n");
+        return;
     }
     root_fs = kzalloc(sizeof(*root_fs));
     if (root_fs == NULL) {

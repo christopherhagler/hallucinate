@@ -397,6 +397,10 @@ void selftest_run(void) {
     test_vmm();
     test_heap();
     test_sched();
-    test_fs();
+    if (vfs_has_root()) {
+        test_fs();
+    } else {
+        kprintf("selftest: fs write-path test skipped (no root filesystem)\n");
+    }
     kprintf("selftest: passed (%d assertions)\n", assertions);
 }

@@ -1,8 +1,10 @@
 # Testing
 
-`make check` is the gate for every commit. It runs two automated suites; a third level
-(in-kernel self-tests) executes inside the second. All three accumulate over the life of
-the project so regressions in earlier phases are caught forever.
+`make check` is the gate for every commit. It runs host unit tests plus two QEMU
+boot integration runs (with and without a disk attached); in-kernel self-tests
+are a level of their own that executes inside both boot runs. All of it
+accumulates over the life of the project so regressions in earlier phases are
+caught forever.
 
 ## Level 1 — host unit tests (`make check-host`)
 
@@ -43,9 +45,15 @@ selftest: passed (N assertions)
 
 A failed check panics, which the integration harness detects. Self-tests are cheap by
 design (they run on every boot) — heavy stress tests belong at level 1 or behind a
-dedicated integration scenario.
+dedicated integration scenario. When there is no root filesystem (see below), `test_fs`
+is skipped rather than run against a mount that does not exist:
 
-## Level 3 — QEMU integration test (`make check-boot`)
+```
+selftest: fs write-path test skipped (no root filesystem)
+selftest: passed (N assertions)
+```
+
+## Level 3 — QEMU integration tests (`make check-boot`, `make check-boot-nodisk`)
 
 `tests/run_qemu.py` boots the actual disk image headless:
 
@@ -54,22 +62,32 @@ qemu-system-x86_64 -m 256M -drive file=disk.img,format=raw \
     -serial stdio -display none -monitor none -no-reboot
 ```
 
-It asserts that the expected markers appear on the serial console **in order** —
-the authoritative list is `PASS_MARKERS` in `tests/run_qemu.py`, one marker per
-proven subsystem, from the banner through memory, scheduling, the in-kernel
-self-tests, and the ring 3 round trip (`hello from ring 3` is printed by user
-code) to `boot: complete`.
-
-and fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on a 30 s
+It asserts that the expected markers appear on the serial console **in order**, and
+fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on a 30 s
 timeout. On failure the full serial transcript is printed. The bootloader and kernel are
 written so that every fatal path emits one of the failure patterns — a hang without
 output is the only failure mode the harness can attribute solely to a timeout.
 
-The guest boots a throwaway *copy* of `fs.img` and writes to it all boot long — the
-block selftest, the in-kernel fs stress cycles, init's write-path checks. After the
-markers pass, the harness runs `graphfs_fsck` over that written image and fails the
-test unless it is perfectly consistent: **every boot test is also an end-to-end
-crash-consistency test of the write path** (`--fsck`, wired in by `make check-boot`).
+Two configurations run, both gated by `make check`:
+
+- **`check-boot`** attaches `fs.img` as a virtio-blk device, the normal case. The
+  guest boots a throwaway *copy* and writes to it all boot long — the block
+  selftest, the in-kernel fs stress cycles, init's write-path checks. After the
+  markers pass, the harness runs `graphfs_fsck` over that written image and fails
+  the test unless it is perfectly consistent: **every boot test is also an
+  end-to-end crash-consistency test of the write path** (`--fsck`).
+  Authoritative marker list: `PASS_MARKERS_WITH_DISK`, one marker per proven
+  subsystem, from the banner through memory, scheduling, the in-kernel
+  self-tests, and the ring 3 round trip (`hello from ring 3` is printed by user
+  code) to `boot: complete`.
+- **`check-boot-nodisk`** attaches no `fs.img` at all — the same disk-less state
+  real hardware is in before an AHCI/NVMe driver exists (Appendix M). Every
+  layer must degrade instead of panicking: `virtio-blk: no device`,
+  `block: selftest skipped (no device)`, `vfs: no block device found`,
+  `process: no root filesystem, skipping init`, and still `boot: complete`.
+  Authoritative marker list: `PASS_MARKERS_NO_DISK`. This is what proves the
+  real-hardware smoke test will not simply panic before AHCI exists — checked
+  on every commit, not just the day someone has a USB stick in hand.
 
 As the OS grows, new integration scenarios add markers (and eventually scripted input via
 the QEMU monitor); existing markers are never removed, only extended.

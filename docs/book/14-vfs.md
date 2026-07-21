@@ -203,7 +203,42 @@ write-path checks (48 through 85, from `O_CREAT|O_EXCL` through the
 without a trace). Every `make check` is now a crash-consistency test of the
 write path, forever.
 
-## 14.8 The transferable lessons
+## 14.8 Booting without a disk: the last panic that had to go
+
+Every layer below the VFS already knew how to say "not present" instead of
+falling over: `virtio_blk_init` logs `virtio-blk: no device` and returns,
+`block_selftest` logs `block: selftest skipped (no device)` and returns. Only
+`vfs_init` still panicked — `if (bd == NULL) panic(...)` — because at the
+time it was written, nothing could run without a root filesystem, so a
+missing disk *was* fatal. That stopped being true the moment real hardware
+entered the picture: this kernel is going to boot on physical hardware
+(Appendix M) before an AHCI or NVMe driver exists to give it a disk at all,
+and a panic on the very first boot attempt is a wasted trip to the machine
+for a failure that was knowable in advance.
+
+The fix is smaller than it sounds, because the shape was already right one
+layer down. `vfs_init` mirrors the pattern: no device means devfs still
+comes up (`/dev/console` needs no disk) and the function returns instead of
+mounting anything. But `vfs_init` isn't a leaf — a dozen call sites assumed a
+mounted root without checking, from `vfs_open`'s fallthrough to graphfs down
+to `vfs_read_file`, and two boot-time callers (`process_run_init`, the fs
+selftest) needed to *ask* rather than find out by crashing. The honest fix
+touches every one of them: a `vfs_has_root()` accessor, an `-ENODEV` guard at
+each entry point that would otherwise dereference a null mount, and two call
+sites that check first and skip loudly instead of finding out through a
+kernel panic on an `ENOENT` no one expected. `process_run_init` in particular
+now says exactly what happened — `process: no root filesystem, skipping
+init` — instead of the caller-visible symptom being "init failed to load."
+
+The payoff is a genuine third boot configuration, not just a code path that
+compiles: `make check-boot-nodisk` boots the disk image with no virtio-blk
+device attached at all and asserts the kernel still reaches
+`boot: complete` having panicked nowhere, on every commit, forever — the same
+discipline that turned the write path into a permanent crash-consistency
+test now covers "what does this kernel do with no disk," months before there
+was hardware to try it on.
+
+## 14.9 The transferable lessons
 
 - **An ops vtable plus a refcounted description is the whole VFS trick.** Four
   ops tables, one dispatch site, POSIX offset-sharing from one refcount — no
@@ -228,6 +263,11 @@ write path, forever.
 - **Deviate loudly or not at all.** The `-EBUSY` unlink policy is a
   deliberate, written-down departure from POSIX with its lifting condition
   named — the opposite of a quiet shortcut.
+- **A hard requirement changes what "done" means for code you already
+  shipped.** Nothing about `vfs_init`'s panic was wrong when Phase 5 landed;
+  it became wrong the moment "runs on real hardware" turned from a goal into
+  a constraint every boot path has to satisfy, including the one where the
+  disk driver that constraint depends on doesn't exist yet.
 
 The kernel now walks one namespace from `/` to devices and disk files,
 nothing it runs is embedded in it, and the namespace changes under it —
