@@ -43,6 +43,8 @@ struct vblk_hdr {
 };
 
 static struct virtio_dev vdev;
+static struct virtq vblk_vq;     /* the single request queue (queue 0) */
+static uint16_t vblk_notify_off; /* its doorbell offset */
 static struct bdev vblk_bdev;
 static uint64_t req_phys; /* frame holding header + status byte */
 
@@ -65,14 +67,14 @@ static int vblk_rw(struct bdev *bd, uint64_t lba, void *buf, const void *cbuf) {
         {data_phys, BLOCK_SIZE},
         {req_phys + sizeof(*hdr), 1},
     };
-    int head = virtq_add(&vdev.vq, sgs, (uint16_t)(is_write ? 2 : 1), (uint16_t)(is_write ? 1 : 2));
+    int head = virtq_add(&vblk_vq, sgs, (uint16_t)(is_write ? 2 : 1), (uint16_t)(is_write ? 1 : 2));
     KASSERT(head >= 0); /* queue is empty between synchronous requests */
-    virtio_pci_notify_q0(&vdev);
+    virtio_pci_notify(&vdev, 0, vblk_notify_off);
 
     uint64_t deadline = timer_ticks() + ((uint64_t)REQ_TIMEOUT_MS * timer_hz() / 1000u) + 1;
     for (;;) {
         __asm__ volatile("" ::: "memory"); /* re-read the used ring */
-        int id = virtq_take_used(&vdev.vq, NULL);
+        int id = virtq_take_used(&vblk_vq, NULL);
         if (id == head) {
             break;
         }
@@ -114,6 +116,11 @@ void virtio_blk_init(void) {
         kprintf("virtio-blk: transport setup failed\n");
         return;
     }
+    if (virtio_pci_queue_setup(&vdev, 0, &vblk_vq, &vblk_notify_off) != 0) {
+        kprintf("virtio-blk: request queue setup failed\n");
+        return;
+    }
+    virtio_pci_driver_ok(&vdev);
 
     req_phys = pmm_alloc_frame();
     if (req_phys == 0) {
@@ -123,7 +130,7 @@ void virtio_blk_init(void) {
     /* Device config §5.2.4: capacity is in 512-byte sectors. */
     uint64_t sectors = virtio_pci_cfg_read64(&vdev, 0);
     kprintf("virtio-blk: %llu MiB (%llu sectors), queue size %u\n",
-            (unsigned long long)(sectors * 512u >> 20), (unsigned long long)sectors, vdev.vq.size);
+            (unsigned long long)(sectors * 512u >> 20), (unsigned long long)sectors, vblk_vq.size);
 
     vblk_bdev.name = "virtio-blk";
     vblk_bdev.nblocks = sectors / SECTORS_PER_BLOCK;

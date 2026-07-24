@@ -120,19 +120,20 @@ uint64_t virtio_pci_cfg_read64(const struct virtio_dev *vd, uint32_t off) {
     }
 }
 
-void virtio_pci_notify_q0(struct virtio_dev *vd) {
+void virtio_pci_notify(struct virtio_dev *vd, uint16_t index, uint16_t notify_off) {
     /* Compiler barrier: every ring store above must be issued before
      * the doorbell (x86 TSO keeps them ordered at the CPU level). */
     __asm__ volatile("" ::: "memory");
-    volatile uint8_t *door = vd->notify + ((uint64_t)vd->q0_notify_off * vd->notify_mult);
-    *(volatile uint16_t *)door = 0; /* queue index */
+    volatile uint8_t *door = vd->notify + ((uint64_t)notify_off * vd->notify_mult);
+    *(volatile uint16_t *)door = index; /* the queue index (§4.1.5.2) */
 }
 
-static int queue0_setup(struct virtio_dev *vd) {
-    mmio_write16(vd->common, COMMON_QSELECT, 0);
+int virtio_pci_queue_setup(struct virtio_dev *vd, uint16_t index, struct virtq *vq,
+                           uint16_t *notify_off_out) {
+    mmio_write16(vd->common, COMMON_QSELECT, index);
     uint16_t qsize = mmio_read16(vd->common, COMMON_QSIZE);
     if (qsize == 0) {
-        return -ENODEV;
+        return -ENODEV; /* no such queue on this device */
     }
     if (qsize > VIRTQ_SIZE_MAX) {
         qsize = VIRTQ_SIZE_MAX; /* the driver may shrink the queue */
@@ -153,15 +154,21 @@ static int queue0_setup(struct virtio_dev *vd) {
     memset(phys_to_virt(used_phys), 0, PAGE_SIZE);
 
     uint64_t avail_phys = da_phys + virtq_desc_bytes(qsize);
-    virtq_init(&vd->vq, qsize, phys_to_virt(da_phys), phys_to_virt(avail_phys),
-               phys_to_virt(used_phys));
+    virtq_init(vq, qsize, phys_to_virt(da_phys), phys_to_virt(avail_phys), phys_to_virt(used_phys));
 
     mmio_write64(vd->common, COMMON_QDESC, da_phys);
     mmio_write64(vd->common, COMMON_QDRIVER, avail_phys);
     mmio_write64(vd->common, COMMON_QDEVICE, used_phys);
-    vd->q0_notify_off = mmio_read16(vd->common, COMMON_QNOTIFOFF);
+    if (notify_off_out != NULL) {
+        *notify_off_out = mmio_read16(vd->common, COMMON_QNOTIFOFF);
+    }
     mmio_write16(vd->common, COMMON_QENABLE, 1);
     return 0;
+}
+
+void virtio_pci_driver_ok(struct virtio_dev *vd) {
+    uint8_t status = mmio_read8(vd->common, COMMON_STATUS);
+    mmio_write8(vd->common, COMMON_STATUS, (uint8_t)(status | VIRTIO_STATUS_DRIVER_OK));
 }
 
 int virtio_pci_setup(struct virtio_dev *vd, const struct pci_dev *pdev, uint64_t features) {
@@ -227,13 +234,8 @@ int virtio_pci_setup(struct virtio_dev *vd, const struct pci_dev *pdev, uint64_t
         return -ENODEV;
     }
 
-    int rc = queue0_setup(vd);
-    if (rc != 0) {
-        mmio_write8(vd->common, COMMON_STATUS, VIRTIO_STATUS_FAILED);
-        return rc;
-    }
-
-    status |= VIRTIO_STATUS_DRIVER_OK;
-    mmio_write8(vd->common, COMMON_STATUS, status);
+    /* The device is in FEATURES_OK. The driver sets up its virtqueues
+     * (virtio_pci_queue_setup) and then goes live (virtio_pci_driver_ok);
+     * per §3.1.1 the queues must exist before DRIVER_OK. */
     return 0;
 }

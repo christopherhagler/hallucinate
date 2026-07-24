@@ -51,10 +51,22 @@ notify, and device config, each naming a BAR and offset. The regions are
 reached through the direct map (BARs sit below 4 GiB, which `vmm_init()`
 maps uncached); a BAR outside that window is rejected loudly.
 
-Bring-up follows §3.1.1 exactly: reset (bounded wait), ACKNOWLEDGE, DRIVER,
-feature negotiation — `VIRTIO_F_VERSION_1` is required, anything else is
-per-driver — FEATURES_OK (verified by reading it back), queue setup,
-DRIVER_OK. Any failure marks the device FAILED and leaves it quiescent.
+Bring-up follows §3.1.1 exactly, split across three calls so a driver can
+place its own queue setup in the middle: `virtio_pci_setup` does reset
+(bounded wait), ACKNOWLEDGE, DRIVER, feature negotiation
+(`VIRTIO_F_VERSION_1` required, anything else per-driver), and stops at
+FEATURES_OK (verified by reading it back); the driver then calls
+`virtio_pci_queue_setup` once per virtqueue it uses; and `virtio_pci_driver_ok`
+sets DRIVER_OK last, because §3.1.1 requires the queues to exist before the
+device goes live. Any failure marks the device FAILED and leaves it quiescent.
+
+The queues belong to the driver, not the transport: `struct virtio_dev`
+holds only the register regions and the notify multiplier, while each driver
+declares its own `struct virtq` (one for the block device; the Phase 6
+virtio-console uses several) and keeps the `queue_notify_off` its setup
+returned, passing it to `virtio_pci_notify(vd, index, notify_off)` to ring
+that queue's doorbell. This is what let virtio-serial be added without
+touching the block driver's request path.
 
 **Virtqueue.** The split-ring bookkeeping — descriptor chains, free-list
 recycling, available/used index math — is a pure module
@@ -66,9 +78,11 @@ addresses, memory barriers, and the notify doorbell. The core also defends
 against a misbehaving device: an out-of-range used id or a corrupted chain
 cannot loop or overrun the driver.
 
-v1 scope, stated: queue 0 only, no MSI-X, completions are polled. The
-kernel is single-CPU and its callers block on I/O anyway, so interrupt
-completion buys nothing yet; it arrives with async I/O.
+v1 scope, stated: no MSI-X, completions are polled. The kernel is
+single-CPU and its callers block on I/O anyway, so interrupt completion
+buys nothing yet; it arrives with async I/O. (The transport handles any
+number of queues — the block device uses one, the console more — but every
+queue is polled the same way.)
 
 ## virtio-blk (`kernel/drivers/virtio_blk.c`)
 
