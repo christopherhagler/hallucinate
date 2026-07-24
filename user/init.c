@@ -17,10 +17,14 @@
  * fstat/lseek/getdents64, devfs, path normalization) against the
  * known contents of the boot filesystem image, and the write path
  * (O_CREAT/O_EXCL/O_TRUNC/O_APPEND, write, mkdir/rmdir, link/unlink,
- * rename, fsync) in a scratch tree it removes without a trace. The
- * exit status is the report: 0 means every check passed, any other
- * value names the first failed check. The kernel prints the status
- * and the boot integration test asserts on it.
+ * rename, fsync) in a scratch tree it removes without a trace. It
+ * closes with Phase 6's IPC groundwork: pipe(2) (a byte-stream round
+ * trip across a real fork, EOF, EPIPE) and socketpair(2) (the same,
+ * plus the full-duplex property a pipe's two directional fds don't
+ * have, and domain/type/protocol validation). The exit status is the
+ * report: 0 means every check passed, any other value names the
+ * first failed check. The kernel prints the status and the boot
+ * integration test asserts on it.
  */
 #include <stdint.h>
 
@@ -536,6 +540,129 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     }
     if (sys_close(pfd[1]) != 0) {
         return 104;
+    }
+
+    /* --- local sockets --- */
+
+    int sv[2];
+    if (sys_socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        return 105;
+    }
+    /* Wrong domain / wrong type / wrong protocol are rejected before
+     * anything is allocated (Appendix J's documented v1 policy: only
+     * AF_UNIX + SOCK_STREAM + protocol 0). */
+    int rej[2];
+    if (sys_socketpair(2 /* not AF_UNIX */, SOCK_STREAM, 0, rej) != -EAFNOSUPPORT) {
+        return 106;
+    }
+    if (sys_socketpair(AF_UNIX, 2 /* not SOCK_STREAM */, 0, rej) != -EPROTONOSUPPORT) {
+        return 107;
+    }
+    if (sys_socketpair(AF_UNIX, SOCK_STREAM, 1, rej) != -EPROTONOSUPPORT) {
+        return 108;
+    }
+    {
+        struct stat sst;
+        if (sys_fstat(sv[0], &sst) != 0 || (sst.st_mode & S_IFMT) != S_IFSOCK) {
+            return 109;
+        }
+    }
+    if (sys_lseek(sv[0], 0, SEEK_SET) != -ESPIPE) {
+        return 110;
+    }
+    /* Full duplex: unlike a pipe's two directional fds, both ends of
+     * a socketpair read and write. */
+    static const char to_b[] = "sv[0] to sv[1]";
+    static const char to_a[] = "sv[1] back to sv[0]";
+    if (sys_write(sv[0], to_b, sizeof(to_b)) != (long)sizeof(to_b)) {
+        return 111;
+    }
+    if (sys_write(sv[1], to_a, sizeof(to_a)) != (long)sizeof(to_a)) {
+        return 112;
+    }
+    {
+        char buf[sizeof(to_b)];
+        if (sys_read(sv[1], buf, sizeof(buf)) != (long)sizeof(buf)) {
+            return 113;
+        }
+        for (unsigned i = 0; i < sizeof(to_b); i++) {
+            if (buf[i] != to_b[i]) {
+                return 114;
+            }
+        }
+    }
+    {
+        char buf[sizeof(to_a)];
+        if (sys_read(sv[0], buf, sizeof(buf)) != (long)sizeof(buf)) {
+            return 115;
+        }
+        for (unsigned i = 0; i < sizeof(to_a); i++) {
+            if (buf[i] != to_a[i]) {
+                return 116;
+            }
+        }
+    }
+    if (sys_close(sv[0]) != 0 || sys_close(sv[1]) != 0) {
+        return 117;
+    }
+
+    /* Across fork: the child writes its half and closes both ends;
+     * the parent reads to EOF (the child's close, not its own, is
+     * what makes the peer go away) and reaps it. */
+    if (sys_socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        return 118;
+    }
+    static const char cmsg2[] = "from the child, over a socket";
+    pid = sys_fork();
+    if (pid < 0) {
+        return 119;
+    }
+    if (pid == 0) {
+        sys_close(sv[0]);
+        sys_write(sv[1], cmsg2, sizeof(cmsg2));
+        sys_close(sv[1]);
+        sys_exit(0);
+    }
+    sys_close(sv[1]); /* the parent's copy: the child's is the last one */
+    {
+        char buf[64];
+        long got = 0;
+        long n = 0;
+        while (got < (long)sizeof(buf)) {
+            n = sys_read(sv[0], buf + got, sizeof(buf) - (unsigned long)got);
+            if (n <= 0) {
+                break;
+            }
+            got += n;
+        }
+        if (n != 0 || got != (long)sizeof(cmsg2)) {
+            return 120;
+        }
+        for (long i = 0; i < got; i++) {
+            if (buf[i] != cmsg2[i]) {
+                return 121;
+            }
+        }
+    }
+    if (sys_wait4(-1, &wstatus, 0) != pid || wstatus != 0) {
+        return 122;
+    }
+    if (sys_close(sv[0]) != 0) {
+        return 123;
+    }
+
+    /* No peer left: write reports -EPIPE instead of blocking forever. */
+    if (sys_socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        return 124;
+    }
+    if (sys_close(sv[0]) != 0) {
+        return 125;
+    }
+    if (sys_write(sv[1], "z", 1) != -EPIPE) {
+        return 126;
+    }
+    if (sys_close(sv[1]) != 0) {
+        return 127;
     }
 
     /* Patch the report in .data before printing it: proves the

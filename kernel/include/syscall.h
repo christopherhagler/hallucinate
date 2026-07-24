@@ -24,6 +24,7 @@
 #define SYS_lseek      8
 #define SYS_pipe       22
 #define SYS_getpid     39
+#define SYS_socketpair 53
 #define SYS_fork       57
 #define SYS_execve     59
 #define SYS_exit       60

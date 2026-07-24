@@ -33,6 +33,7 @@ Implemented today (numbers from the Linux x86_64 table):
 | 8 | `lseek(fd, off, whence)` | SET/CUR/END on files and directories; `-ESPIPE` on the console |
 | 22 | `pipe(fds[2])` | anonymous pipe: `fds[0]` read end, `fds[1]` write end (Appendix J) |
 | 39 | `getpid()` | the calling process's pid |
+| 53 | `socketpair(domain, type, protocol, sv[2])` | local socket pair, both ends full-duplex; only `AF_UNIX`/`SOCK_STREAM`/0 (Appendix J) |
 | 57 | `fork()` | full process clone (eager copy; COW later); child gets rax = 0 |
 | 59 | `execve(path, argv, envp)` | replace the image with the ELF at `path` on the filesystem; SysV argv/envp stack; fds survive |
 | 60 | `exit(status)` | zombie in the table, parent woken, every fd closed |
@@ -214,7 +215,7 @@ stack. The linked ELFs are installed at `/bin` on the graphfs image
 through the VFS and joins it:
 
 ```
-user: launching init (/bin/init from disk, 17688 bytes)
+user: launching init (/bin/init from disk, 17824 bytes)
 hello from ring 3
 hello from execve
 user: console open via /dev/console ok
@@ -230,7 +231,7 @@ hardware before an AHCI/NVMe driver exists (Appendix M).
 
 Init doubles as the acceptance test for the loader, the ABI, the process
 model, and the whole VFS. Its exit status names the first failed check; 0
-means all one hundred four passed: `write` returns the full length, `.bss`
+means all one hundred twenty-seven passed: `write` returns the full length, `.bss`
 zero-filled, `.data` initialized and writable, `getpid`,
 `-ENOSYS`/`-EBADF`/`-EFAULT` error paths, all six argument registers
 surviving a syscall, the full process round trip — `fork` returns a fresh
@@ -252,13 +253,18 @@ sharing bytes and nlink; rename moving and the moved-into-own-subtree case
 refused `-EINVAL`; `mkdir`/`rmdir`/`unlink` with their whole errno
 vocabulary (`-EEXIST`, `-ENOTEMPTY`, `-EISDIR`, `-ENOTDIR`, the open-file
 `-EBUSY` policy, devfs `-EPERM`, mount-point `-EBUSY`, cross-mount
-`-EXDEV`) — and pipes (Appendix J): each end refuses the other's direction
-with the right errno, a small write/read round-trips byte-for-byte, a piped
+`-EXDEV`) — pipes (Appendix J): each end refuses the other's direction with
+the right errno, a small write/read round-trips byte-for-byte, a piped
 message survives a real `fork` (the child writes and closes both ends, the
 parent reads to `EOF` and reaps it through `wait4`), and a write with no
-readers left returns `-EPIPE` instead of hanging. After init is reaped, the
-kernel asserts the process table is empty and that the physical frame count
-matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
+readers left returns `-EPIPE` instead of hanging — and local sockets
+(Appendix J): `socketpair` rejects any domain/type/protocol but
+`AF_UNIX`/`SOCK_STREAM`/0, both ends of one pair write and read independently
+(full duplex, unlike a pipe's two directional fds), the same fork/`EOF`/
+`-EPIPE` round trip pipes prove, and `fstat`'s `S_IFSOCK` file type. After
+init is reaped, the kernel asserts the process table is empty and that the
+physical frame count matches the pre-launch value: the whole fork/exec/wait
+cycle leaks nothing.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
@@ -274,6 +280,12 @@ matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
   validation.
 - The kernel does not save FPU/SSE state, so user code is built `-mno-sse`
   (enforced by `USER_CFLAGS`); lazy FPU switching comes later.
-- Pipes have no `O_NONBLOCK` (every read/write blocks as needed) and, since
-  `dup`/`dup2` don't exist yet, no way to remap a pipe end onto fds 0/1/2
-  before an `execve` — the classic shell-pipeline construction needs both.
+- Pipes and local sockets have no `O_NONBLOCK` (every read/write blocks as
+  needed) and, since `dup`/`dup2` don't exist yet, no way to remap either
+  onto fds 0/1/2 before an `execve` — the classic shell-pipeline
+  construction needs both.
+- `socketpair` implements only `AF_UNIX`/`SOCK_STREAM`/protocol 0. There is
+  no `socket`/`bind`/`listen`/`connect`/`accept`: nothing yet needs two
+  *unrelated* processes to rendezvous by name, only a parent handing
+  connected endpoints to children the way `pipe` does. Revisit when Phase
+  8's compositor needs unrelated clients to find it (Appendix J).

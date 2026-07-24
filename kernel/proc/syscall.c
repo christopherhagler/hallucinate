@@ -207,6 +207,34 @@ static uint64_t sys_pipe(uint64_t ufds) {
     return 0;
 }
 
+static uint64_t sys_socketpair(uint64_t domain, uint64_t type, uint64_t protocol, uint64_t usv) {
+    struct file *fa = NULL;
+    struct file *fb = NULL;
+    long rc = socketpair_open((int)domain, (int)type, (int)protocol, &fa, &fb);
+    if (rc != 0) {
+        return (uint64_t)rc;
+    }
+    long afd = process_fd_install(fa);
+    if (afd < 0) {
+        vfs_file_put(fa);
+        vfs_file_put(fb);
+        return (uint64_t)afd;
+    }
+    long bfd = process_fd_install(fb);
+    if (bfd < 0) {
+        process_fd_close((int)afd);
+        vfs_file_put(fb);
+        return (uint64_t)bfd;
+    }
+    int32_t sv[2] = {(int32_t)afd, (int32_t)bfd};
+    if (!user_range_ok(usv, sizeof(sv), 1) || user_copy_to(usv, sv, sizeof(sv)) != 0) {
+        process_fd_close((int)afd);
+        process_fd_close((int)bfd);
+        return ERR(EFAULT);
+    }
+    return 0;
+}
+
 static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count) {
     struct file *f = process_file_get((int)fd);
     if (f == NULL) {
@@ -243,6 +271,9 @@ void syscall_dispatch(struct syscall_frame *frame) {
         return;
     case SYS_pipe:
         frame->rax = sys_pipe(frame->rdi);
+        return;
+    case SYS_socketpair:
+        frame->rax = sys_socketpair(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         return;
     case SYS_getpid:
         frame->rax = (uint64_t)process_getpid();

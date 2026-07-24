@@ -169,3 +169,18 @@ long devfs_open(const char *rel, int flags, struct file **out);
  * *write_out each hold one reference; the only failure is -ENOMEM.
  */
 long pipe_open(struct file **read_out, struct file **write_out);
+
+/* socketpair(2) domain/type: the only combination kernel/fs/socket.c
+ * accepts. Values match the Linux ABI. */
+#define AF_UNIX     1
+#define SOCK_STREAM 1
+
+/*
+ * Local socket pair (kernel/fs/socket.c): validates domain/type/
+ * protocol (only AF_UNIX/SOCK_STREAM/0 is supported; anything else is
+ * -EAFNOSUPPORT/-EPROTONOSUPPORT) and allocates two open file
+ * descriptions, each full-duplex, each able to read what the other
+ * writes. On success *a_out and *b_out each hold one reference; the
+ * only other failure is -ENOMEM.
+ */
+long socketpair_open(int domain, int type, int protocol, struct file **a_out, struct file **b_out);

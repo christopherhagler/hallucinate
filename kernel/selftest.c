@@ -373,6 +373,94 @@ static void test_pipe(void) {
     kprintf("selftest: pipes ok (blocking write/read, EOF, EPIPE)\n");
 }
 
+/* --- local sockets --- */
+
+/*
+ * Proves what test_pipe() proves for pipes (a real blocking handoff
+ * across sched_block()/sched_wake(), EOF, -EPIPE), plus the part
+ * unique to socketpair: both ends are simultaneously readable and
+ * writable (full duplex), not split into separate read/write
+ * descriptions the way pipe(2)'s two fds are.
+ */
+static void test_socket(void) {
+    uint64_t threads_before = sched_thread_count();
+    uint64_t objects_before = kmalloc_live_objects();
+
+    struct file *fa = NULL;
+    struct file *fb = NULL;
+    CHECK(socketpair_open(AF_UNIX, SOCK_STREAM, 0, &fa, &fb) == 0);
+
+    /* Full duplex, no blocking involved: each end writes, the other
+     * reads its own, independent direction. */
+    static const char msg_a[] = "a-to-b";
+    static const char msg_b[] = "b-to-a-and-back";
+    CHECK(fa->ops->write(fa, msg_a, sizeof(msg_a)) == (long)sizeof(msg_a));
+    CHECK(fb->ops->write(fb, msg_b, sizeof(msg_b)) == (long)sizeof(msg_b));
+    {
+        char buf[sizeof(msg_a)];
+        CHECK(fb->ops->read(fb, buf, sizeof(buf)) == (long)sizeof(buf));
+        CHECK(memcmp(buf, msg_a, sizeof(msg_a)) == 0);
+    }
+    {
+        char buf[sizeof(msg_b)];
+        CHECK(fa->ops->read(fa, buf, sizeof(buf)) == (long)sizeof(buf));
+        CHECK(memcmp(buf, msg_b, sizeof(msg_b)) == 0);
+    }
+
+    /* Real blocking handoff, several times a channel's capacity: a
+     * writer thread on one end, this thread reading the other —
+     * pipe_write_worker/pipe_write_ctx are generic over struct file,
+     * so test_pipe()'s helpers serve here unchanged. */
+    enum { DATA_LEN = (4096 * 3) + 77 };
+    static uint8_t src[DATA_LEN];
+    static uint8_t dst[DATA_LEN];
+    uint32_t seed = 0xFACADEu;
+    for (size_t i = 0; i < DATA_LEN; i++) {
+        seed = (seed * 1103515245u) + 12345u;
+        src[i] = (uint8_t)(seed >> 24);
+    }
+    struct pipe_write_ctx ctx = {.f = fa, .data = src, .len = DATA_LEN, .result = -1};
+    struct thread *writer = thread_create("sock-writer", pipe_write_worker, &ctx);
+
+    size_t got = 0;
+    while (got < DATA_LEN) {
+        long n = fb->ops->read(fb, dst + got, DATA_LEN - got);
+        CHECK(n > 0); /* the writer is still alive; EOF here is a bug */
+        got += (size_t)n;
+    }
+    thread_join(writer);
+    CHECK(ctx.result == DATA_LEN);
+    CHECK(memcmp(src, dst, DATA_LEN) == 0);
+
+    /* pipe_write_worker already dropped fa's only reference: fb's read
+     * must resolve to EOF now, not block forever. */
+    CHECK(fb->ops->read(fb, dst, sizeof(dst)) == 0);
+    vfs_file_put(fb);
+
+    CHECK(sched_thread_count() == threads_before);
+    CHECK(kmalloc_live_objects() == objects_before);
+
+    /* -EPIPE: writing with the peer already gone, no blocking involved. */
+    struct file *fa2 = NULL;
+    struct file *fb2 = NULL;
+    CHECK(socketpair_open(AF_UNIX, SOCK_STREAM, 0, &fa2, &fb2) == 0);
+    vfs_file_put(fb2);
+    uint8_t one = 'x';
+    CHECK(fa2->ops->write(fa2, &one, 1) == -EPIPE);
+    vfs_file_put(fa2);
+
+    /* Unsupported domain/type/protocol are rejected before anything is
+     * allocated. */
+    struct file *rej_a = NULL;
+    struct file *rej_b = NULL;
+    CHECK(socketpair_open(2 /* not AF_UNIX */, SOCK_STREAM, 0, &rej_a, &rej_b) == -EAFNOSUPPORT);
+    CHECK(socketpair_open(AF_UNIX, 2 /* not SOCK_STREAM */, 0, &rej_a, &rej_b) == -EPROTONOSUPPORT);
+    CHECK(socketpair_open(AF_UNIX, SOCK_STREAM, 1, &rej_a, &rej_b) == -EPROTONOSUPPORT);
+
+    CHECK(kmalloc_live_objects() == objects_before);
+    kprintf("selftest: sockets ok (full duplex, blocking write/read, EOF, EPIPE)\n");
+}
+
 /* --- the filesystem write path --- */
 
 /*
@@ -473,6 +561,7 @@ void selftest_run(void) {
     test_heap();
     test_sched();
     test_pipe();
+    test_socket();
     if (vfs_has_root()) {
         test_fs();
     } else {

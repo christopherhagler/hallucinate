@@ -18,6 +18,7 @@
 #define SYS_lseek      8
 #define SYS_pipe       22
 #define SYS_getpid     39
+#define SYS_socketpair 53
 #define SYS_fork       57
 #define SYS_execve     59
 #define SYS_exit       60
@@ -31,22 +32,24 @@
 #define SYS_getdents64 217
 
 /* Error numbers (Linux x86_64 values, negated in return values). */
-#define EPERM     1
-#define ENOENT    2
-#define EBADF     9
-#define ECHILD    10
-#define EFAULT    14
-#define EBUSY     16
-#define EEXIST    17
-#define EXDEV     18
-#define ENOTDIR   20
-#define EISDIR    21
-#define EINVAL    22
-#define ESPIPE    29
-#define EROFS     30
-#define EPIPE     32
-#define ENOSYS    38
-#define ENOTEMPTY 39
+#define EPERM           1
+#define ENOENT          2
+#define EBADF           9
+#define ECHILD          10
+#define EFAULT          14
+#define EBUSY           16
+#define EEXIST          17
+#define EXDEV           18
+#define ENOTDIR         20
+#define EISDIR          21
+#define EINVAL          22
+#define ESPIPE          29
+#define EROFS           30
+#define EPIPE           32
+#define ENOSYS          38
+#define ENOTEMPTY       39
+#define EPROTONOSUPPORT 93
+#define EAFNOSUPPORT    97
 
 /* open(2) flags (Linux x86_64 values). */
 #define O_RDONLY    0
@@ -64,11 +67,16 @@
 #define SEEK_END 2
 
 /* st_mode file-type field. */
-#define S_IFMT  0170000u
-#define S_IFREG 0100000u
-#define S_IFDIR 0040000u
-#define S_IFCHR 0020000u
-#define S_IFIFO 0010000u
+#define S_IFMT   0170000u
+#define S_IFSOCK 0140000u
+#define S_IFREG  0100000u
+#define S_IFDIR  0040000u
+#define S_IFCHR  0020000u
+#define S_IFIFO  0010000u
+
+/* socketpair(2): the only domain/type/protocol this kernel accepts. */
+#define AF_UNIX     1
+#define SOCK_STREAM 1
 
 /* getdents64 d_type values. */
 #define DT_CHR 2u
@@ -157,6 +165,11 @@ static inline long sys_fsync(int fd) {
 /* fds[0] = read end, fds[1] = write end, as Linux pipe(2). */
 static inline long sys_pipe(int fds[2]) {
     return syscall1(SYS_pipe, (long)(uintptr_t)fds);
+}
+
+/* AF_UNIX/SOCK_STREAM only; sv[0] and sv[1] are both full-duplex. */
+static inline long sys_socketpair(int domain, int type, int protocol, int sv[2]) {
+    return syscall4(SYS_socketpair, domain, type, protocol, (long)(uintptr_t)sv);
 }
 
 static inline long sys_mkdir(const char *path, long mode) {

@@ -33,10 +33,12 @@ semantics. graphfs — our from-scratch copy-on-write property-graph filesystem 
 mounted read-write at `/` through a VFS with devfs at `/dev`; userspace creates,
 writes, links, renames, and unlinks files with the Linux ABI, and after every boot
 test an fsck proves the written image is still perfectly consistent. Phase 6 (AI as
-a system service) is now in progress: anonymous pipes (`pipe(2)`) landed first — a
-blocking producer/consumer byte stream with real reader/writer wakeups, the first
-VFS object that isn't graphfs or devfs — as the IPC groundwork the AI daemon and a
-future shell both need.**
+a system service) is now in progress: the IPC groundwork the AI daemon and a future
+shell both need has landed — anonymous pipes (`pipe(2)`), a blocking producer/
+consumer byte stream with real reader/writer wakeups, and local sockets
+(`socketpair(2)`), pipe's full-duplex sibling built the same way (two shared rings
+instead of one). Both are VFS objects with no path and no mount, the first two
+that aren't graphfs or devfs.**
 
 Phase 4 delivered a real process model — fork, execve, wait — running in ring 3 with full
 fault isolation.
@@ -59,10 +61,13 @@ from ring 3. A faulting process dies alone: a hardware exception in ring 3 kills
 process with the matching Linux signal (`SIGSEGV`, `SIGILL`, ...), reported to the parent
 through wait4, while the kernel and every other process keep running — the boot below
 shows two deliberately crashed children being reaped. Init's exit status 0 asserts
-104 checks: segment integrity, register preservation across syscalls, every error
+127 checks: segment integrity, register preservation across syscalls, every error
 path, the fork/exec/wait round trip, fault isolation itself, the whole file surface
-— read side and write path — and pipes: a blocking round trip across a real `fork`,
-`EOF` once every writer has closed, `-EPIPE` once every reader has.
+— read side and write path — pipes (a blocking round trip across a real `fork`,
+`EOF` once every writer has closed, `-EPIPE` once every reader has), and local
+sockets (the same guarantees, plus both ends of one `socketpair(2)` reading and
+writing at once, and domain/type/protocol validation that rejects anything but
+`AF_UNIX`/`SOCK_STREAM`/0).
 
 Phase 5's storage stack is real end to end. The kernel scans the PCI bus, drives a
 **modern virtio-blk device implemented against the VIRTIO 1.2 specification**
@@ -120,9 +125,10 @@ vfs: graphfs root mounted rw (gen 7, 4080/4096 blocks free, 1018/1024 nodes free
 vfs: devfs at /dev (console)
 selftest: sched interleave "abcabcabcabc"
 selftest: pipes ok (blocking write/read, EOF, EPIPE)
+selftest: sockets ok (full duplex, blocking write/read, EOF, EPIPE)
 selftest: fs write path ok (create/write/rename/unlink cycles)
-selftest: passed (848 assertions)
-user: launching init (/bin/init from disk, 17688 bytes)
+selftest: passed (870 assertions)
+user: launching init (/bin/init from disk, 17824 bytes)
 hello from ring 3
 hello from execve
 trap: user fault: #PF page fault at rip=0x401384 (error 0x6, cr2=0xffffffff80000000)

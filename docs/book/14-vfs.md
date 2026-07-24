@@ -130,7 +130,7 @@ image into a kernel buffer, load, free — and the built-in program table,
 marker changes from `launching init (embedded ELF)` to:
 
 ```
-user: launching init (/bin/init from disk, 17688 bytes)
+user: launching init (/bin/init from disk, 17824 bytes)
 ```
 
 and the integration test asserts the new text — the boot now *proves* init came

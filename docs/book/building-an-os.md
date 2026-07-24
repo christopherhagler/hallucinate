@@ -2883,7 +2883,7 @@ image into a kernel buffer, load, free — and the built-in program table,
 marker changes from `launching init (embedded ELF)` to:
 
 ```
-user: launching init (/bin/init from disk, 17688 bytes)
+user: launching init (/bin/init from disk, 17824 bytes)
 ```
 
 and the integration test asserts the new text — the boot now *proves* init came
@@ -4878,6 +4878,7 @@ Implemented today (numbers from the Linux x86_64 table):
 | 8 | `lseek(fd, off, whence)` | SET/CUR/END on files and directories; `-ESPIPE` on the console |
 | 22 | `pipe(fds[2])` | anonymous pipe: `fds[0]` read end, `fds[1]` write end (Appendix J) |
 | 39 | `getpid()` | the calling process's pid |
+| 53 | `socketpair(domain, type, protocol, sv[2])` | local socket pair, both ends full-duplex; only `AF_UNIX`/`SOCK_STREAM`/0 (Appendix J) |
 | 57 | `fork()` | full process clone (eager copy; COW later); child gets rax = 0 |
 | 59 | `execve(path, argv, envp)` | replace the image with the ELF at `path` on the filesystem; SysV argv/envp stack; fds survive |
 | 60 | `exit(status)` | zombie in the table, parent woken, every fd closed |
@@ -5059,7 +5060,7 @@ stack. The linked ELFs are installed at `/bin` on the graphfs image
 through the VFS and joins it:
 
 ```
-user: launching init (/bin/init from disk, 17688 bytes)
+user: launching init (/bin/init from disk, 17824 bytes)
 hello from ring 3
 hello from execve
 user: console open via /dev/console ok
@@ -5075,7 +5076,7 @@ hardware before an AHCI/NVMe driver exists (Appendix M).
 
 Init doubles as the acceptance test for the loader, the ABI, the process
 model, and the whole VFS. Its exit status names the first failed check; 0
-means all one hundred four passed: `write` returns the full length, `.bss`
+means all one hundred twenty-seven passed: `write` returns the full length, `.bss`
 zero-filled, `.data` initialized and writable, `getpid`,
 `-ENOSYS`/`-EBADF`/`-EFAULT` error paths, all six argument registers
 surviving a syscall, the full process round trip — `fork` returns a fresh
@@ -5097,13 +5098,18 @@ sharing bytes and nlink; rename moving and the moved-into-own-subtree case
 refused `-EINVAL`; `mkdir`/`rmdir`/`unlink` with their whole errno
 vocabulary (`-EEXIST`, `-ENOTEMPTY`, `-EISDIR`, `-ENOTDIR`, the open-file
 `-EBUSY` policy, devfs `-EPERM`, mount-point `-EBUSY`, cross-mount
-`-EXDEV`) — and pipes (Appendix J): each end refuses the other's direction
-with the right errno, a small write/read round-trips byte-for-byte, a piped
+`-EXDEV`) — pipes (Appendix J): each end refuses the other's direction with
+the right errno, a small write/read round-trips byte-for-byte, a piped
 message survives a real `fork` (the child writes and closes both ends, the
 parent reads to `EOF` and reaps it through `wait4`), and a write with no
-readers left returns `-EPIPE` instead of hanging. After init is reaped, the
-kernel asserts the process table is empty and that the physical frame count
-matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
+readers left returns `-EPIPE` instead of hanging — and local sockets
+(Appendix J): `socketpair` rejects any domain/type/protocol but
+`AF_UNIX`/`SOCK_STREAM`/0, both ends of one pair write and read independently
+(full duplex, unlike a pipe's two directional fds), the same fork/`EOF`/
+`-EPIPE` round trip pipes prove, and `fstat`'s `S_IFSOCK` file type. After
+init is reaped, the kernel asserts the process table is empty and that the
+physical frame count matches the pre-launch value: the whole fork/exec/wait
+cycle leaks nothing.
 
 ## Known limits of this slice (by design, lifted in later slices)
 
@@ -5119,9 +5125,15 @@ matches the pre-launch value: the whole fork/exec/wait cycle leaks nothing.
   validation.
 - The kernel does not save FPU/SSE state, so user code is built `-mno-sse`
   (enforced by `USER_CFLAGS`); lazy FPU switching comes later.
-- Pipes have no `O_NONBLOCK` (every read/write blocks as needed) and, since
-  `dup`/`dup2` don't exist yet, no way to remap a pipe end onto fds 0/1/2
-  before an `execve` — the classic shell-pipeline construction needs both.
+- Pipes and local sockets have no `O_NONBLOCK` (every read/write blocks as
+  needed) and, since `dup`/`dup2` don't exist yet, no way to remap either
+  onto fds 0/1/2 before an `execve` — the classic shell-pipeline
+  construction needs both.
+- `socketpair` implements only `AF_UNIX`/`SOCK_STREAM`/protocol 0. There is
+  no `socket`/`bind`/`listen`/`connect`/`accept`: nothing yet needs two
+  *unrelated* processes to rendezvous by name, only a parent handing
+  connected endpoints to children the way `pipe` does. Revisit when Phase
+  8's compositor needs unrelated clients to find it (Appendix J).
 
 <div style="page-break-after: always"></div>
 
@@ -5498,6 +5510,58 @@ this kernel puts more than one writer on the same pipe yet, so there is no
 observer to violate the guarantee for; and `O_NONBLOCK` / `dup`-based
 pipeline wiring (Appendix H's known limits).
 
+## Local sockets
+
+`kernel/fs/socket.c` (Phase 6) is pipes' full-duplex sibling: `socketpair(2)`
+(syscall 53, Appendix H) allocates a shared pair and two open file
+descriptions over it, again with no path and no mount. It reuses every piece
+pipes established rather than inventing new ones:
+
+- **Two `pipe_core` rings, not one.** `struct socket_pair` holds
+  `chan[2]`, each a `struct sock_chan` wrapping the same pure, host-tested
+  ring buffer pipes use. `chan[i]` is written by end `i` and read by end
+  `1 - i` — end 0's outgoing mail is end 1's incoming mail and vice versa,
+  which is what "full duplex" means at the data-structure level.
+  `struct file`'s `priv` again supplies the pointer a filesystem-scoped
+  `node` can't (`kernel/fs/pipe_core.c`'s host tests cover this file's ring
+  math too; there is no new pure logic to test).
+- **One description, two roles.** A pipe end is either a reader or a
+  writer, so `pipe_open` builds two different `file_ops` tables. A
+  socketpair end is both, so `SOCKET_OPS` has a real `read` *and* a real
+  `write` — the read op looks at `chan[1 - self]` (the peer's outgoing
+  ring), the write op targets `chan[self]` (this end's outgoing ring).
+- **`release` still turns "the other side is gone" into `EOF`/`-EPIPE`**,
+  but one call now has to retire both of an end's roles at once: closing
+  end `e` marks `end_open[e] = 0`, which means the peer's blocked writers
+  on `chan[e]` must wake (their reader just vanished: `-EPIPE`) and the
+  peer's blocked readers on `chan[1 - e]` must wake too (their writer just
+  vanished: `EOF`, once the ring drains). Pipes track this per-role with
+  `readers`/`writers` counts; a socketpair end plays both roles at once, so
+  one `end_open[2]` array of booleans is the whole state — there is exactly
+  one description per end, same as a pipe's exactly-one-reader/
+  exactly-one-writer assumption, so counts would carry no information a
+  boolean doesn't already have.
+
+**Locking and blocking are pipe.c's pattern verbatim**: interrupts-off
+critical sections, `sched_block()` called from inside one so the wait is
+published before the block (the same lost-wakeup argument, reused a fifth
+and sixth time — two more wait queues, one per ring), FIFO queues on
+`thread->next`. The wait-queue helper trio (`wq_push`/`wq_wake_all`/
+`wq_wake_one`) is duplicated from `pipe.c` rather than factored out, the
+same call `mutex.c` and `pipe.c` already made against each other: three
+copies of a ten-line static helper is cheaper to read than the abstraction
+that would remove the third one, while there is no fourth user in sight.
+
+**Scope, deliberately**: only `AF_UNIX`, `SOCK_STREAM`, and protocol `0` are
+accepted (`-EAFNOSUPPORT` for any other domain, `-EPROTONOSUPPORT` for any
+other type or a nonzero protocol) — the exact "complete or absent" contract
+`open`'s flag handling already set. There is no `socket`/`bind`/`listen`/
+`connect`/`accept`: everything this kernel needs a local socket for so far
+is a parent handing connected endpoints to children, exactly like `pipe`,
+so named rendezvous between unrelated processes is left undone rather than
+half-built. It becomes necessary no later than Phase 8, when the GUI
+compositor has to be found by clients it didn't fork.
+
 ## Locking
 
 The kernel's first sleeping lock (`kernel/sched/mutex.c`, `struct mutex`)
@@ -5534,7 +5598,7 @@ marker proves it:
 ```
 vfs: graphfs root mounted rw (gen 7, 4081/4096 blocks free, 1018/1024 nodes free)
 vfs: devfs at /dev (console)
-user: launching init (/bin/init from disk, 17688 bytes)
+user: launching init (/bin/init from disk, 17824 bytes)
 ```
 
 ## Booting without a root filesystem
@@ -5603,6 +5667,9 @@ it, and mounting garbage silently would be worse than stopping.
 - One global filesystem lock; revisit when I/O stops being polled (or SMP).
 - Lexical `..` normalization is valid only while the namespace is a strict
   tree with no symlinks (graphfs v1 policy).
+- `socketpair` supports only `AF_UNIX`/`SOCK_STREAM`/protocol 0, and there
+  is no `socket`/`bind`/`listen`/`connect`/`accept` — named rendezvous
+  between unrelated processes, needed no later than Phase 8's compositor.
 - One console, one waiter slot; concurrent readers serialize.
 
 <div style="page-break-after: always"></div>
