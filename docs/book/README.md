@@ -90,6 +90,7 @@ Two structural decisions shape almost every chapter, so learn them now:
 | K | [graphfs](appendix-k-graphfs.md) | The native filesystem's authoritative on-disk format |
 | L | [Testing](appendix-l-testing.md) | The three-level test strategy behind `make check` |
 | M | [Real Hardware](appendix-m-real-hardware.md) | Building the USB image, flashing it, and the disk-less boot smoke test |
+| N | [The AI Host Channel](appendix-n-ai-channel.md) | The COM2 UART transport beneath `/dev/ai`, and why it isn't virtio-serial |
 
 ## A note on how to read it
 

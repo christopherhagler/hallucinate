@@ -62,11 +62,14 @@ device goes live. Any failure marks the device FAILED and leaves it quiescent.
 
 The queues belong to the driver, not the transport: `struct virtio_dev`
 holds only the register regions and the notify multiplier, while each driver
-declares its own `struct virtq` (one for the block device; the Phase 6
-virtio-console uses several) and keeps the `queue_notify_off` its setup
-returned, passing it to `virtio_pci_notify(vd, index, notify_off)` to ring
-that queue's doorbell. This is what let virtio-serial be added without
-touching the block driver's request path.
+declares its own `struct virtq` (one for the block device; a multi-queue
+device like a future NIC uses several) and keeps the `queue_notify_off` its
+setup returned, passing it to `virtio_pci_notify(vd, index, notify_off)` to
+ring that queue's doorbell. This N-queue generalization was originally done
+as prep for a virtio-serial AI channel; that channel ended up on a real
+16550 UART instead (Appendix N), but the transport work stands on its own —
+it is what will let a multi-queue virtio device be added without touching the
+block driver's request path.
 
 **Virtqueue.** The split-ring bookkeeping — descriptor chains, free-list
 recycling, available/used index math — is a pure module

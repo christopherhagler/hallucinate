@@ -6,6 +6,7 @@
  */
 #include <stdint.h>
 
+#include <aichan.h>
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/gdt.h>
 #include <arch/x86_64/irq.h>
@@ -123,8 +124,10 @@ void kmain(uint64_t bootinfo_phys) {
     virtio_blk_init();
     block_selftest();
     vfs_init();
+    aichan_init();
 
     selftest_run();
+    aichan_selftest();
 
     process_run_init();
 

@@ -59,8 +59,20 @@ selftest: passed (N assertions)
 
 ```
 qemu-system-x86_64 -m 256M -drive file=disk.img,format=raw \
-    -serial stdio -display none -monitor none -no-reboot
+    -serial stdio \
+    -chardev socket,id=aichan,path=…/com2.sock,server=on,wait=off \
+    -serial chardev:aichan \
+    -display none -monitor none -no-reboot
 ```
+
+The first `-serial` is COM1, the debug console the harness reads markers from;
+the second is COM2, the AI host channel (Appendix N), backed by a Unix socket
+the harness itself connects to. Beyond the marker checks below, the harness
+plays the host peer for that channel: it waits for the guest's ready greeting,
+sends a nonce challenge, and requires the guest to echo it back — a real
+round trip over the serial line, and the exact plumbing the future `aid`
+bridge reuses. The round trip must succeed for the test to pass, in both
+configurations.
 
 It asserts that the expected markers appear on the serial console **in order**, and
 fails immediately if `PANIC` (kernel) or `ERR:` (bootloader) appears, or on a 30 s

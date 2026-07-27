@@ -123,11 +123,13 @@ block: virtio-blk, 16 MiB (4096 blocks of 4096), cache 256 KiB
 block: selftest passed (write/readback/restore)
 vfs: graphfs root mounted rw (gen 7, 4080/4096 blocks free, 1018/1024 nodes free)
 vfs: devfs at /dev (console)
+aichan: COM2 UART ready (port 0x2f8, 115200 8N1, polled)
 selftest: sched interleave "abcabcabcabc"
 selftest: pipes ok (blocking write/read, EOF, EPIPE)
 selftest: sockets ok (full duplex, blocking write/read, EOF, EPIPE)
 selftest: fs write path ok (create/write/rename/unlink cycles)
 selftest: passed (870 assertions)
+aichan: selftest ok (echoed 6 bytes)
 user: launching init (/bin/init from disk, 17824 bytes)
 hello from ring 3
 hello from execve

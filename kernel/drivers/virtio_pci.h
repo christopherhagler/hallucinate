@@ -3,11 +3,11 @@
  *
  * Locates the device's common/notify/device-config regions through
  * the vendor capabilities (VIRTIO 1.2 §4.1.4) and performs the status
- * handshake and feature negotiation. Drivers (virtio_blk.c, and the
- * virtio-console in Phase 6) build on this: they set up whatever
- * virtqueues they need with virtio_pci_queue_setup — one for the
- * block device, several for a multi-queue console — and each owns its
- * own struct virtq. Legacy (pre-1.0) devices are not supported: the
+ * handshake and feature negotiation. Drivers (virtio_blk.c today, a
+ * multi-queue device such as a NIC later) build on this: they set up
+ * whatever virtqueues they need with virtio_pci_queue_setup — one for
+ * the block device, several for a multi-queue device — and each owns
+ * its own struct virtq. Legacy (pre-1.0) devices are not supported: the
  * device must expose the modern capability set.
  *
  * v1 scope: no MSI-X — completions are polled, which suits the

@@ -22,6 +22,7 @@ mode; see PASS_MARKERS_NO_DISK below.
 import argparse
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -43,9 +44,11 @@ PASS_MARKERS_WITH_DISK = [
     "block: selftest passed",
     "vfs: graphfs root mounted rw",
     "vfs: devfs at /dev",
+    "aichan: COM2 UART ready",
     "selftest: sched interleave",
     "selftest: fs write path ok",
     "selftest: passed",
+    "aichan: selftest ok",
     "user: launching init (/bin/init from disk",
     "hello from ring 3",
     "hello from execve",
@@ -79,9 +82,11 @@ PASS_MARKERS_NO_DISK = [
     "block: selftest skipped (no device)",
     "vfs: no block device found",
     "vfs: devfs at /dev",
+    "aichan: COM2 UART ready",
     "selftest: sched interleave",
     "selftest: fs write-path test skipped (no root filesystem)",
     "selftest: passed",
+    "aichan: selftest ok",
     "process: no root filesystem, skipping init",
     "boot: complete",
 ]
@@ -90,6 +95,83 @@ FAIL_PATTERNS = [
     "PANIC",
     "ERR:",
 ]
+
+
+class AichanPeer:
+    """Host end of the guest's AI channel (COM2), exposed by QEMU as a Unix
+    socket. Stands in for the future `aid` bridge: wait for the guest to
+    announce the port is ready, send a challenge, and confirm the guest
+    echoes it back — a real end-to-end round trip over the serial line, the
+    same plumbing the Claude API bridge will use.
+
+    The ready handshake matters: the challenge is sent only *after* the
+    guest's greeting arrives, so it can't land in the receive FIFO before
+    aichan_init's FIFO reset and get flushed. The challenge carries a random
+    nonce and stays under the 16550's 16-byte FIFO.
+    """
+
+    READY = b"hello from guest\n"
+
+    def __init__(self, sock_path: str) -> None:
+        self.sock_path = sock_path
+        self.challenge = b"P" + os.urandom(2).hex().encode() + b"\n"
+        self.ok = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _recv_until(self, conn: "socket.socket", needle: bytes,
+                    buf: bytearray, end: float) -> bool:
+        """Read from conn into buf until needle appears or the deadline hits."""
+        while time.monotonic() < end:
+            if needle in buf:
+                return True
+            try:
+                chunk = conn.recv(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                return False
+            if not chunk:
+                return needle in buf
+            buf.extend(chunk)
+        return needle in buf
+
+    def _run(self) -> None:
+        # QEMU (server=on,wait=off) creates the listening socket during
+        # startup; retry until it is there.
+        conn: "socket.socket | None" = None
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and conn is None:
+            try:
+                conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.connect(self.sock_path)
+            except OSError:
+                if conn is not None:
+                    conn.close()
+                conn = None
+                time.sleep(0.05)
+        if conn is None:
+            return
+
+        with conn:
+            conn.settimeout(0.5)
+            buf = bytearray()
+            end = time.monotonic() + 25.0
+            # Wait for the guest to announce readiness before challenging it.
+            if not self._recv_until(conn, self.READY, buf, end):
+                sys.stderr.write("[aichan] guest never announced ready\n")
+                return
+            conn.sendall(self.challenge)
+            if self._recv_until(conn, self.challenge, buf, end):
+                self.ok = True
+                return
+        sys.stderr.write(
+            f"[aichan] sent={self.challenge!r} received={bytes(buf)!r}\n")
+
+    def join(self, timeout: float) -> None:
+        self._thread.join(timeout=timeout)
 
 
 def main() -> int:
@@ -103,11 +185,20 @@ def main() -> int:
 
     PASS_MARKERS = PASS_MARKERS_WITH_DISK if args.fsimg else PASS_MARKERS_NO_DISK
 
+    # COM2 is the guest's AI host channel; expose it as a Unix socket and
+    # act as its peer for the round-trip selftest. The path is kept short
+    # (macOS caps AF_UNIX paths near 104 bytes, and $TMPDIR is long there).
+    aichan_dir = tempfile.mkdtemp(prefix="aichan-", dir="/tmp")
+    aichan_sock = os.path.join(aichan_dir, "com2.sock")
+
     cmd = [
         args.qemu,
         "-m", "256M",
         "-drive", f"file={args.image},format=raw",
-        "-serial", "stdio",
+        "-serial", "stdio",  # COM1: debug console
+        # COM2: AI channel. Order matters — this is the second -serial.
+        "-chardev", f"socket,id=aichan,path={aichan_sock},server=on,wait=off",
+        "-serial", "chardev:aichan",
         "-display", "none",
         "-monitor", "none",
         "-no-reboot",
@@ -132,6 +223,9 @@ def main() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+
+    aichan = AichanPeer(aichan_sock)
+    aichan.start()
 
     transcript = bytearray()
     lock = threading.Lock()
@@ -174,9 +268,19 @@ def main() -> int:
             if result != "pass":
                 result = f"qemu exited early (status {proc.returncode})"
 
+    # The echo and its COM1 marker are emitted back to back; give the peer
+    # a moment to observe the echo over the socket before tearing QEMU down.
+    if result == "pass":
+        aichan.join(3.0)
+
     proc.kill()
     proc.wait()
     t.join(timeout=2)
+
+    # The AI channel is a required part of the boot: the guest must have
+    # echoed the host's challenge back over COM2.
+    if result == "pass" and not aichan.ok:
+        result = "aichan round-trip failed (guest did not echo the host challenge)"
 
     # The guest wrote to its disk all boot long; the image it leaves
     # behind must still be a perfectly consistent filesystem.
@@ -194,12 +298,13 @@ def main() -> int:
 
     if fs_copy is not None:
         os.unlink(fs_copy.name)
+    shutil.rmtree(aichan_dir, ignore_errors=True)
 
     with lock:
         text = transcript.decode("utf-8", errors="replace")
 
     if result == "pass":
-        print(f"boot test: PASS ({len(PASS_MARKERS)} markers)")
+        print(f"boot test: PASS ({len(PASS_MARKERS)} markers, AI channel round-trip ok)")
         return 0
 
     print("boot test: FAIL")

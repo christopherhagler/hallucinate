@@ -165,5 +165,7 @@ The phase plan (see README) drives toward three pillars:
    static musl binaries (busybox first) run natively — the same approach FreeBSD and
    managarm use. Syscall coverage will be tracked in `docs/syscalls.md`.
 3. **AI as a system service**: a guest daemon (`aid`) bridged to a Claude API helper on
-   the host over virtio-serial, exposed to all processes via `/dev/ai` and dedicated
-   syscalls, with AI-native interfaces (natural-language shell, semantic open) on top.
+   the host over a real 16550 UART (COM2, Appendix N — chosen over virtio-serial so the
+   channel works on the target board, not only under QEMU), exposed to all processes via
+   `/dev/ai` and dedicated syscalls, with AI-native interfaces (natural-language shell,
+   semantic open) on top.

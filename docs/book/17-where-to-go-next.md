@@ -23,7 +23,8 @@ learn a major subsystem:
   a crash first). Each one touches an interface the earlier chapters pinned,
   so you will feel exactly what the pinning bought.
 - **Phase 6 — AI as a system service.** A privileged userspace daemon bridged to
-  a host-side helper over virtio-serial, exposed to every process via `/dev/ai`
+  a host-side helper over a real 16550 UART (COM2 — see Appendix N for why a plain
+  serial line beat virtio-serial here), exposed to every process via `/dev/ai`
   and dedicated syscalls. This is where the `TAG`/`REF` edges designed into
   graphfs in Chapter 13 stop being reserved and start carrying provenance and
   semantic links. The design constraint — AI is a userspace service, *never* in
